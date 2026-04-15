@@ -252,11 +252,27 @@ fn merge_split_rows(all_cells: &mut Vec<Vec<String>>) {
 
             if let Some(j) = found_j {
                 let next = all_cells.remove(j);
-                if (incomplete_section_hdr || incomplete_data_sec) && !next[0].trim().is_empty() {
-                    all_cells[i][0] = format!("{} {}", all_cells[i][0].trim(), next[0].trim());
-                }
-                if incomplete_data_date && !next[1].trim().is_empty() {
-                    all_cells[i][1] = format!("{}{}", all_cells[i][1].trim(), next[1].trim());
+                let next_is_data = next[2..].iter().any(|c| !c.trim().is_empty())
+                    && !next[1].trim().is_empty();
+
+                if incomplete_section_hdr && next_is_data {
+                    // 3-line grouping failure: the PDF split one logical data row
+                    // into three physical lines with Y-gaps too large to group.
+                    //   row i   = first name fragment  (e.g. "BHARTIYA")
+                    //   next    = rest of name + date + data  (e.g. "INTERNATIONAL LTD. -", date, ...)
+                    //   (BSE code row follows and will be merged on the next pass)
+                    // Prepend col0 into next, replace row i with next, re-examine.
+                    let mut merged = next;
+                    merged[0] = format!("{} {}", col0.trim(), merged[0].trim());
+                    all_cells[i] = merged;
+                } else {
+                    // Normal page-break merge: append missing tail into row i.
+                    if (incomplete_section_hdr || incomplete_data_sec) && !next[0].trim().is_empty() {
+                        all_cells[i][0] = format!("{} {}", all_cells[i][0].trim(), next[0].trim());
+                    }
+                    if incomplete_data_date && !next[1].trim().is_empty() {
+                        all_cells[i][1] = format!("{}{}", all_cells[i][1].trim(), next[1].trim());
+                    }
                 }
                 // Re-examine the merged row — it may still need another pass.
                 continue;
@@ -285,6 +301,16 @@ fn find_completion_row(
 
         // Stop at a genuine data row or a complete section header.
         if next_has_trading && !next_col1.is_empty() {
+            // Exception: 3-line grouping failure. An incomplete section header
+            // may be immediately followed by a data row whose col0 is also a
+            // partial security name (no BSE code). In that case, merge col0
+            // fragments rather than stopping.
+            if incomplete_section_hdr
+                && !next_col0.is_empty()
+                && !section_re().is_match(&next_col0)
+            {
+                return Some(j);
+            }
             break;
         }
         if !next_col0.is_empty() && next_all_other_empty && section_re().is_match(&next_col0) {
@@ -662,6 +688,22 @@ mod tests {
             .collect();
         println!("Tata Steel parsed ({})", tata.len());
         assert_eq!(tata.len(), 20, "expected 20 Tata Steel txns");
+    }
+
+    #[test]
+    fn test_bhartiya() {
+        if !std::path::Path::new(PDF_PATH).exists() { return; }
+        let result = parse();
+        let txns: Vec<_> = result.transactions.iter()
+            .filter(|t| t.security_name.to_lowercase().contains("bhartiya"))
+            .collect();
+        println!("Bhartiya parsed ({}):", txns.len());
+        for t in &txns {
+            println!("  {} | {} | {} | {} @ {}", t.trade_date, t.txn_type, t.trade_segment, t.quantity, t.price);
+        }
+        assert_eq!(result.skipped_details.iter()
+            .filter(|r| r.security_name.to_lowercase().contains("bhartiya"))
+            .count(), 0, "no Bhartiya rows should be skipped");
     }
 
     #[test]
