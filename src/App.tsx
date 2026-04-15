@@ -1,51 +1,57 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+import { SetupScreen } from "@/components/auth/SetupScreen";
+import { LoginScreen } from "@/components/auth/LoginScreen";
+import { AppLayout } from "@/components/layout/AppLayout";
+import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
+
+type AppState = "loading" | "setup" | "locked" | "onboarding" | "unlocked";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [appState, setAppState] = useState<AppState>("loading");
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  useEffect(() => {
+    async function checkAuthState() {
+      const setup = await invoke<boolean>("is_setup");
+      if (!setup) {
+        setAppState("setup");
+        return;
+      }
+      const unlocked = await invoke<boolean>("is_unlocked");
+      if (!unlocked) { setAppState("locked"); return; }
+      // Check if user has any portfolios yet
+      const portfolios = await invoke<{ portfolio_id: number }[]>("get_portfolios");
+      setAppState(portfolios.length === 0 ? "onboarding" : "unlocked");
+    }
+    checkAuthState();
+  }, []);
+
+  if (appState === "loading") {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <p className="text-muted-foreground">Loading…</p>
+      </div>
+    );
   }
 
-  return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+  if (appState === "setup") {
+    return <SetupScreen onComplete={() => setAppState("unlocked")} />;
+  }
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+  if (appState === "locked") {
+    return <LoginScreen onUnlocked={async () => {
+      const portfolios = await invoke<{ portfolio_id: number }[]>("get_portfolios");
+      setAppState(portfolios.length === 0 ? "onboarding" : "unlocked");
+    }} />;
+  }
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
-  );
+  if (appState === "onboarding") {
+    return <OnboardingWizard onComplete={() => setAppState("unlocked")} />;
+  }
+
+  // Unlocked — main app
+  return <AppLayout onLock={() => setAppState("locked")} />;
 }
 
 export default App;
