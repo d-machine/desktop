@@ -283,7 +283,7 @@ export function CapitalGainsPage() {
       <div className="flex-1 border rounded-lg overflow-hidden">
         <div className="overflow-auto h-full">
           <table className="w-full text-sm">
-            <thead className="bg-muted/50 sticky top-0 z-10">
+            <thead className="bg-muted sticky top-0 z-10">
               {table.getHeaderGroups().map((hg) => (
                 <tr key={hg.id}>
                   {hg.headers.map((header) => (
@@ -322,7 +322,7 @@ export function CapitalGainsPage() {
             </tbody>
             {/* Totals footer */}
             {!loading && !isEmpty && report && (
-              <tfoot className="bg-muted/50 sticky bottom-0 border-t">
+              <tfoot className="bg-muted sticky bottom-0 border-t">
                 <tr>
                   <td colSpan={6} className="px-3 py-2 text-xs font-medium text-muted-foreground">
                     {report.lots.length} matched lot{report.lots.length !== 1 ? "s" : ""}

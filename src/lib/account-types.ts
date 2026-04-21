@@ -16,6 +16,7 @@ export const ACCOUNT_TYPES: AccountTypeOption[] = [
 
 export const BROKERS = [
   "Zerodha", "Groww", "Upstox", "Angel One", "HDFC Securities",
-  "ICICI Direct", "Kotak Securities", "Motilal Oswal", "SBI Securities",
-  "Paytm Money", "5Paisa", "Fyers", "Other",
+  "ICICI Direct", "ICICI Securities", "Kotak Securities", "Motilal Oswal",
+  "SBI Securities", "Paytm Money", "5Paisa", "Fyers",
+  "Choice Equity", "Choice Wealth", "Other",
 ];

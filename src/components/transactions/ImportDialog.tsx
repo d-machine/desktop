@@ -33,7 +33,7 @@ interface ImportDialogProps {
 }
 
 type Step = "pick" | "account" | "preview" | "fix" | "importing" | "done";
-type ImportSource = "ANGELONE" | "CHOICE_MF" | "CHOICE_EQUITY";
+type ImportSource = "ANGELONE" | "CHOICE_MF" | "CHOICE_EQUITY" | "ICICI_EQUITY";
 
 interface AngelOneParsed {
   trades: AngelOneTrade[];
@@ -95,15 +95,43 @@ interface ChoiceEquityTrade {
   price: number;
 }
 
-type AnyParsed = AngelOneParsed | ChoiceMfParsed | ChoiceEquityParsed;
+interface IciciEquityParsed {
+  transactions: IciciEquityTrade[];
+  contract_charges: IciciContractNoteCharges[];
+  total_rows: number;
+  skipped_rows: number;
+  client_code: string;
+  date_range: [string, string];
+}
+interface IciciEquityTrade {
+  trade_date: string;
+  trade_time?: string;
+  cn_no: string;
+  security_name: string;
+  isin: string;
+  exchange: string;
+  txn_type: string;
+  quantity: number;
+  price: number;
+  brokerage: number;
+  broker_ref?: string;
+}
+interface IciciContractNoteCharges {
+  cn_no: string;
+  trade_date: string;
+  stt_paise: number;
+  stamp_charges_paise: number;
+  gst_paise: number;
+  trans_charges_paise: number;
+  other_charges_paise: number;
+  total_payable_paise: number;
+}
+
+type AnyParsed = AngelOneParsed | ChoiceMfParsed | ChoiceEquityParsed | IciciEquityParsed;
 
 // ─── Source config ────────────────────────────────────────────────────────────
 
-const SOURCES: { value: ImportSource; label: string; description: string; ext: string[] }[] = [
-  { value: "ANGELONE",      label: "Angel One — Trades & Charges",   description: ".xlsx from Angel One back-office", ext: ["xlsx"] },
-  { value: "CHOICE_MF",     label: "Choice Wealth — MF Statement",   description: ".pdf from Choice Wealth MF portal", ext: ["pdf"] },
-  { value: "CHOICE_EQUITY", label: "Choice Equity — Global Details", description: ".pdf Global Details Report from Choice Equity", ext: ["pdf"] },
-];
+interface ImportSourceMeta { value: ImportSource; label: string; description: string; }
 
 function prefilledAccount(source: ImportSource, parsed: AnyParsed) {
   if (source === "ANGELONE") {
@@ -119,7 +147,16 @@ function prefilledAccount(source: ImportSource, parsed: AnyParsed) {
       accountNo: p.client_id || "",
     };
   }
-  return { name: "Choice MF", accountType: "MF", broker: "Choice Wealth", accountNo: "" };
+  if (source === "ICICI_EQUITY") {
+    const p = parsed as IciciEquityParsed;
+    return {
+      name: p.client_code || "ICICI Securities",
+      accountType: "DEMAT",
+      broker: "ICICI Securities",
+      accountNo: p.client_code || "",
+    };
+  }
+  return { name: "Choice MF", accountType: "MF_FOLIO", broker: "Choice Wealth", accountNo: "" };
 }
 
 function detectExistingAccount(source: ImportSource, parsed: AnyParsed, accounts: Account[]) {
@@ -131,16 +168,20 @@ function detectExistingAccount(source: ImportSource, parsed: AnyParsed, accounts
     const id = (parsed as ChoiceEquityParsed).client_id;
     if (id) return accounts.find(a => a.account_no === id) ?? null;
   }
+  if (source === "ICICI_EQUITY") {
+    const code = (parsed as IciciEquityParsed).client_code;
+    if (code) return accounts.find(a => a.account_no === code) ?? null;
+  }
   return null;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported }: ImportDialogProps) {
-  const [step, setStep]         = useState<Step>("pick");
-  const [source, setSource]     = useState<ImportSource | "">("");
-  const [filePath, setFilePath] = useState("");
-  const [parsing, setParsing]   = useState(false);
+  const [step, setStep]           = useState<Step>("pick");
+  const [source, setSource]       = useState<ImportSource | "">("");
+  const [filePaths, setFilePaths] = useState<string[]>([]);
+  const [parsing, setParsing]     = useState(false);
   const [parseError, setParseError] = useState("");
 
   const [parsed, setParsed] = useState<AnyParsed | null>(null);
@@ -148,6 +189,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
   // Account resolution
   const [accountMode, setAccountMode]   = useState<"existing" | "create">("create");
   const [selectedAcctId, setSelectedAcctId] = useState("");
+  const [sources, setSources]           = useState<ImportSourceMeta[]>([]);
   const [portfolios, setPortfolios]     = useState<Portfolio[]>([]);
   const [newAcct, setNewAcct] = useState({ name: "", portfolioId: "", accountType: "EQUITY", broker: "", accountNo: "" });
   const [creatingPortfolio, setCreatingPortfolio] = useState(false);
@@ -167,19 +209,21 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
   const [fixableRows, setFixableRows] = useState<FixableRow[]>([]);
 
   // Import result
-  const [importResult, setImportResult] = useState<{ imported: number; skipped: number; unmatched?: string[]; autoCreated?: string[] } | null>(null);
+  interface SkippedDetail { trade_date: string; security_name: string; txn_type: string; quantity: number; price: number; reason: string; }
+  const [importResult, setImportResult] = useState<{ imported: number; skipped: number; unmatched?: string[]; autoCreated?: string[]; skippedDetails?: SkippedDetail[] } | null>(null);
   const [importError, setImportError]   = useState("");
 
   // ── Load portfolios once ──────────────────────────────────────────────────
   useEffect(() => {
     if (isOpen) {
       invoke<Portfolio[]>("get_portfolios").then(setPortfolios).catch(() => {});
+      invoke<ImportSourceMeta[]>("get_import_sources").then(setSources).catch(() => {});
     }
   }, [isOpen]);
 
   // ── Reset ─────────────────────────────────────────────────────────────────
   const reset = () => {
-    setStep("pick"); setSource(""); setFilePath(""); setParsing(false);
+    setStep("pick"); setSource(""); setFilePaths([]); setParsing(false);
     setParseError(""); setParsed(null);
     setAccountMode("create"); setSelectedAcctId(""); setResolvedAcct(null);
     setNewAcct({ name: "", portfolioId: "", accountType: "EQUITY", broker: "", accountNo: "" });
@@ -187,28 +231,110 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
     setImportResult(null); setImportError("");
   };
 
-  // ── Step 1: pick file ─────────────────────────────────────────────────────
+  // ── Step 1: pick files ────────────────────────────────────────────────────
   const handlePickFile = async () => {
-    const src = SOURCES.find(s => s.value === source);
-    const selected = await open({
-      title: "Select Statement File",
-      filters: src ? [{ name: "Statement", extensions: src.ext }] : undefined,
+    const selected = await open({ title: "Select Statement File(s)", multiple: true });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    setFilePaths(prev => {
+      // Deduplicate by filename
+      const existing = new Set(prev);
+      return [...prev, ...paths.filter(p => !existing.has(p))];
     });
-    if (selected) setFilePath(selected as string);
   };
 
+  const removeFile = (path: string) => setFilePaths(prev => prev.filter(p => p !== path));
+
   const handleParse = async () => {
-    if (!source || !filePath) return;
+    if (!source || filePaths.length === 0) return;
     setParsing(true);
     setParseError("");
     try {
+      // Parse each file and merge results
       let result: AnyParsed;
       if (source === "ANGELONE") {
-        result = await invoke<AngelOneParsed>("parse_angel_one_xlsx", { filePath });
+        const results = await Promise.all(
+          filePaths.map(fp => invoke<AngelOneParsed>("parse_angel_one_xlsx", { filePath: fp }))
+        );
+        const mergedA = results.slice(1).reduce((acc, r) => ({
+          trades: [...acc.trades, ...r.trades],
+          unmatched_scrips: [...new Set([...acc.unmatched_scrips, ...r.unmatched_scrips])],
+          date_range: [
+            acc.date_range[0] < r.date_range[0] ? acc.date_range[0] : r.date_range[0],
+            acc.date_range[1] > r.date_range[1] ? acc.date_range[1] : r.date_range[1],
+          ] as [string, string],
+          client_code: acc.client_code || r.client_code,
+        }), results[0]);
+        const seenA = new Set<string>();
+        mergedA.trades = mergedA.trades.filter(t => {
+          if (!t.trade_id) return true;
+          if (seenA.has(t.trade_id)) return false;
+          seenA.add(t.trade_id);
+          return true;
+        });
+        result = mergedA;
       } else if (source === "CHOICE_MF") {
-        result = await invoke<ChoiceMfParsed>("parse_choice_mf_pdf", { filePath });
+        const results = await Promise.all(
+          filePaths.map(fp => invoke<ChoiceMfParsed>("parse_choice_mf_pdf", { filePath: fp }))
+        );
+        result = results.slice(1).reduce((acc, r) => ({
+          transactions: [...acc.transactions, ...r.transactions],
+          total_rows:   acc.total_rows + r.total_rows,
+          skipped_rows: acc.skipped_rows + r.skipped_rows,
+        }), results[0]);
+      } else if (source === "ICICI_EQUITY") {
+        const results = await Promise.all(
+          filePaths.map(fp => invoke<IciciEquityParsed>("parse_icici_equity_pdf", { filePath: fp }))
+        );
+        const merged = results.slice(1).reduce((acc, r) => ({
+          transactions:     [...acc.transactions, ...r.transactions],
+          contract_charges: [...acc.contract_charges, ...r.contract_charges],
+          total_rows:       acc.total_rows + r.total_rows,
+          skipped_rows:     acc.skipped_rows + r.skipped_rows,
+          client_code:      acc.client_code || r.client_code,
+          date_range: [
+            acc.date_range[0] < r.date_range[0] ? acc.date_range[0] : r.date_range[0],
+            acc.date_range[1] > r.date_range[1] ? acc.date_range[1] : r.date_range[1],
+          ] as [string, string],
+        }), results[0]);
+        // Deduplicate across files by cn_no: same contract note = same trading day,
+        // keep only the first occurrence of each CN (trades + charges).
+        const seenCn = new Set<string>();
+        merged.transactions = merged.transactions.filter(t => {
+          if (seenCn.has(t.cn_no)) return false;
+          // Don't add cn_no to seenCn here — multiple trades share the same CN
+          return true;
+        });
+        // Dedup contract_charges by cn_no
+        const seenCnCharges = new Set<string>();
+        merged.contract_charges = merged.contract_charges.filter(c => {
+          if (seenCnCharges.has(c.cn_no)) return false;
+          seenCnCharges.add(c.cn_no);
+          return true;
+        });
+        // Dedup trades by broker_ref within the surviving set
+        const seenRef = new Set<string>();
+        merged.transactions = merged.transactions.filter(t => {
+          if (!t.broker_ref) return true;
+          if (seenRef.has(t.broker_ref)) return false;
+          seenRef.add(t.broker_ref);
+          return true;
+        });
+        merged.total_rows = merged.transactions.length;
+        result = merged;
       } else {
-        result = await invoke<ChoiceEquityParsed>("parse_choice_equity_pdf", { filePath });
+        const results = await Promise.all(
+          filePaths.map(fp => invoke<ChoiceEquityParsed>("parse_choice_equity_pdf", { filePath: fp }))
+        );
+        result = results.slice(1).reduce((acc, r) => ({
+          transactions:  [...acc.transactions, ...r.transactions],
+          total_rows:    acc.total_rows + r.total_rows,
+          skipped_rows:  acc.skipped_rows + r.skipped_rows,
+          intraday_rows: (acc.intraday_rows ?? 0) + (r.intraday_rows ?? 0),
+          client_id:     acc.client_id || r.client_id,
+          client_name:   acc.client_name || r.client_name,
+          skipped_details: [...(acc.skipped_details ?? []), ...(r.skipped_details ?? [])],
+        }), results[0]);
       }
       setParsed(result);
 
@@ -228,7 +354,13 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
           portfolioId: portfolios[0]?.portfolio_id.toString() ?? "",
         }));
       } else {
-        setAccountMode("create");
+        // No auto-match — if existing accounts exist, show the list first so user
+        // consciously decides before we default to creating a new one.
+        if (accounts.length > 0) {
+          setAccountMode("existing");
+        } else {
+          setAccountMode("create");
+        }
         const pre = prefilledAccount(source, result);
         setNewAcct(a => ({ ...a, ...pre, portfolioId: portfolios[0]?.portfolio_id.toString() ?? "" }));
       }
@@ -345,12 +477,24 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
           { accountId: resolvedAcct.account_id, transactions: (parsed as ChoiceMfParsed).transactions },
         );
         setImportResult({ imported: r.imported, skipped: r.skipped });
+      } else if (source === "ICICI_EQUITY") {
+        const icici = parsed as IciciEquityParsed;
+        const r = await invoke<{ imported: number; skipped: number; contract_notes_imported: number; contract_notes_skipped: number; auto_created_instruments: number; skipped_details: SkippedDetail[] }>(
+          "import_icici_equity_trades",
+          {
+            accountId:       resolvedAcct.account_id,
+            transactions:    icici.transactions,
+            contractCharges: icici.contract_charges,
+            filePaths:       filePaths,
+          },
+        );
+        setImportResult({ imported: r.imported, skipped: r.skipped, skippedDetails: r.skipped_details });
       } else {
-        const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number }>(
+        const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number; skipped_details: SkippedDetail[] }>(
           "import_choice_equity_trades",
           { accountId: resolvedAcct.account_id, transactions: (parsed as ChoiceEquityParsed).transactions },
         );
-        setImportResult({ imported: r.imported, skipped: r.skipped });
+        setImportResult({ imported: r.imported, skipped: r.skipped, skippedDetails: r.skipped_details });
       }
       setStep("done");
     } catch (e: any) {
@@ -431,6 +575,29 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
         </table>
       );
     }
+    if (source === "ICICI_EQUITY") {
+      const trades = (parsed as IciciEquityParsed).transactions.slice(0, 10);
+      return (
+        <table className="w-full text-xs">
+          <thead><tr className="border-b text-muted-foreground">
+            <th className="py-1 text-left">Date</th>
+            <th className="py-1 text-left">Security</th>
+            <th className="py-1 text-left">Side</th>
+            <th className="py-1 text-right">Qty</th>
+            <th className="py-1 text-right">Price</th>
+          </tr></thead>
+          <tbody>{trades.map((t, i) => (
+            <tr key={i} className="border-b border-border/40">
+              <td className="py-1 pr-2 text-muted-foreground">{t.trade_date}</td>
+              <td className="py-1 pr-2 font-medium max-w-[160px] truncate">{t.security_name}</td>
+              <td className={`py-1 pr-2 font-medium ${t.txn_type === "BUY" ? "text-green-600 dark:text-green-400" : "text-red-500"}`}>{t.txn_type}</td>
+              <td className="py-1 pr-2 text-right">{t.quantity}</td>
+              <td className="py-1 text-right">{formatINR(t.price * 100)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      );
+    }
     return null;
   };
 
@@ -439,7 +606,9 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
       ? (parsed as AngelOneParsed).trades.length
       : source === "CHOICE_EQUITY"
         ? (parsed as ChoiceEquityParsed).total_rows
-        : (parsed as ChoiceMfParsed).total_rows
+        : source === "ICICI_EQUITY"
+          ? (parsed as IciciEquityParsed).total_rows
+          : (parsed as ChoiceMfParsed).total_rows
     : 0;
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -459,7 +628,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
             {step === "pick"    && "Select the source and upload your statement file."}
             {step === "account" && "Confirm or create the account for this statement."}
             {step === "fix"     && "Some rows could not be parsed. Correct them before continuing."}
-            {step === "preview" && `${totalRows} transactions found. Review and confirm.`}
+            {step === "preview" && `${filePaths.length > 1 ? `${filePaths.length} files · ` : ""}${totalRows} transactions found. Review and confirm.`}
             {step === "done"    && "Transactions have been added."}
           </DialogDescription>
         </DialogHeader>
@@ -469,10 +638,10 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
           <div className="space-y-4 py-1">
             <div className="space-y-1.5">
               <Label>Statement source</Label>
-              <Select value={source} onValueChange={(v) => { setSource(v as ImportSource); setFilePath(""); setParseError(""); }}>
+              <Select value={source} onValueChange={(v) => { setSource(v as ImportSource); setFilePaths([]); setParseError(""); }}>
                 <SelectTrigger><SelectValue placeholder="Select source" /></SelectTrigger>
                 <SelectContent>
-                  {SOURCES.map(s => (
+                  {sources.map(s => (
                     <SelectItem key={s.value} value={s.value}>
                       <div>
                         <div className="font-medium">{s.label}</div>
@@ -486,13 +655,27 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
 
             {source && (
               <div className="space-y-1.5">
-                <Label>Statement file</Label>
-                <div className="flex gap-2">
-                  <div className="flex-1 border rounded-md px-3 py-2 text-sm text-muted-foreground truncate bg-muted/30">
-                    {filePath ? filePath.split("/").pop() : "No file selected"}
+                <Label>Statement file{filePaths.length !== 1 ? "s" : ""}</Label>
+                {filePaths.length > 0 && (
+                  <div className="space-y-1 max-h-[170px] overflow-y-auto pr-0.5">
+                    {filePaths.map(fp => (
+                      <div key={fp} className="flex items-center gap-2 border rounded-md px-3 py-1.5 bg-muted/30">
+                        <span className="flex-1 text-sm truncate">{fp.split("/").pop()}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeFile(fp)}
+                          className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                          title="Remove"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  <Button variant="outline" onClick={handlePickFile} type="button">Browse</Button>
-                </div>
+                )}
+                <Button variant="outline" onClick={handlePickFile} type="button" className="w-full">
+                  {filePaths.length > 0 ? "Add more files" : "Browse…"}
+                </Button>
               </div>
             )}
 
@@ -507,6 +690,17 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
         {/* ── Step: account ── */}
         {step === "account" && (
           <div className="space-y-4 py-1">
+            {/* Prompt when no account was auto-matched */}
+            {accountMode === "create" && accounts.length > 0 && (
+              <div className="flex gap-2 items-start rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2.5 text-sm">
+                <div>
+                  <p className="font-medium text-amber-700 dark:text-amber-400">No existing account matched this statement.</p>
+                  <p className="text-xs text-amber-600 dark:text-amber-500 mt-0.5">
+                    If you have already imported this broker before, select the existing account instead of creating a new one.
+                  </p>
+                </div>
+              </div>
+            )}
             {/* Tabs: use existing / create new */}
             <div className="flex gap-2">
               <Button
@@ -515,7 +709,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
                 onClick={() => setAccountMode("existing")}
                 disabled={accounts.length === 0}
               >
-                Use existing
+                Use existing {accounts.length > 0 && `(${accounts.length})`}
               </Button>
               <Button
                 size="sm"
@@ -543,8 +737,8 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
             ) : (
               <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label>Account name</Label>
-                  <Input value={newAcct.name} onChange={e => setNewAcct(a => ({ ...a, name: e.target.value }))} />
+                  <Label>Account name <span className="text-muted-foreground text-xs">(display name)</span></Label>
+                  <Input value={newAcct.name} onChange={e => setNewAcct(a => ({ ...a, name: e.target.value }))} placeholder="e.g. ICICI Trading" />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Portfolio</Label>
@@ -597,8 +791,27 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
                   </div>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Account / Client ID</Label>
-                  <Input value={newAcct.accountNo} onChange={e => setNewAcct(a => ({ ...a, accountNo: e.target.value }))} placeholder="e.g. A1234567" />
+                  <Label>Client ID <span className="text-muted-foreground text-xs">(optional)</span></Label>
+                  <Input
+                    list="existing-client-ids"
+                    value={newAcct.accountNo}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setNewAcct(a => ({ ...a, accountNo: val }));
+                      // If this matches an existing account, switch to existing mode
+                      const match = accounts.find(a => a.account_no === val);
+                      if (match) {
+                        setAccountMode("existing");
+                        setSelectedAcctId(match.account_id.toString());
+                      }
+                    }}
+                    placeholder="e.g. A1234567"
+                  />
+                  <datalist id="existing-client-ids">
+                    {accounts.filter(a => a.account_no).map(a => (
+                      <option key={a.account_id} value={a.account_no!}>{a.name}</option>
+                    ))}
+                  </datalist>
                 </div>
               </div>
             )}
@@ -728,18 +941,46 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
 
         {/* ── Step: done ── */}
         {step === "done" && importResult && (
-          <div className="space-y-2 py-2">
+          <div className="space-y-3 py-2">
             <div className="text-sm font-medium text-green-700 dark:text-green-400">
               {importResult.imported} transaction{importResult.imported !== 1 ? "s" : ""} imported successfully.
             </div>
-            {importResult.skipped > 0 && (
-              <div className="text-sm text-muted-foreground">{importResult.skipped} skipped (duplicates or unmatched).</div>
-            )}
             {importResult.autoCreated && importResult.autoCreated.length > 0 && (
-              <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md px-3 py-2 mt-2">
-                {importResult.autoCreated.length} placeholder instrument{importResult.autoCreated.length !== 1 ? "s" : ""} auto-created (no ISIN yet):{" "}
+              <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md px-3 py-2">
+                {importResult.autoCreated.length} placeholder instrument{importResult.autoCreated.length !== 1 ? "s" : ""} auto-created:{" "}
                 {importResult.autoCreated.slice(0, 8).join(", ")}
                 {importResult.autoCreated.length > 8 && "…"}
+              </div>
+            )}
+            {importResult.skippedDetails && importResult.skippedDetails.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-medium text-muted-foreground">
+                  {importResult.skippedDetails.length} skipped
+                </div>
+                <div className="max-h-48 overflow-y-auto rounded-md border text-xs">
+                  <table className="w-full">
+                    <thead className="sticky top-0 bg-muted/80">
+                      <tr className="border-b text-muted-foreground">
+                        <th className="py-1 px-2 text-left">Date</th>
+                        <th className="py-1 px-2 text-left">Security</th>
+                        <th className="py-1 px-2 text-left">Type</th>
+                        <th className="py-1 px-2 text-right">Qty</th>
+                        <th className="py-1 px-2 text-left">Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importResult.skippedDetails.map((r, i) => (
+                        <tr key={i} className="border-b border-border/40 last:border-0">
+                          <td className="py-1 px-2 text-muted-foreground whitespace-nowrap">{r.trade_date}</td>
+                          <td className="py-1 px-2 max-w-[140px] truncate">{r.security_name}</td>
+                          <td className={`py-1 px-2 ${r.txn_type === "BUY" ? "text-blue-600 dark:text-blue-400" : "text-red-500"}`}>{r.txn_type}</td>
+                          <td className="py-1 px-2 text-right">{r.quantity}</td>
+                          <td className="py-1 px-2 text-muted-foreground">{r.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </div>
@@ -752,8 +993,8 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
           )}
 
           {step === "pick" && (
-            <Button onClick={handleParse} disabled={!source || !filePath || parsing}>
-              {parsing ? "Parsing…" : "Parse File"}
+            <Button onClick={handleParse} disabled={!source || filePaths.length === 0 || parsing}>
+              {parsing ? "Parsing…" : filePaths.length > 1 ? `Parse ${filePaths.length} Files` : "Parse File"}
             </Button>
           )}
 

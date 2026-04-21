@@ -16,6 +16,12 @@ export const TXN_TYPES: TxnTypeOption[] = [
   { value: "BONUS",          label: "Bonus",           defaultSegment: "DELIVERY",  showPrice: false, showCharges: false },
   { value: "SPLIT",          label: "Stock Split",     defaultSegment: "DELIVERY",  showPrice: false, showCharges: false },
   { value: "OPENING_BALANCE",label: "Opening Balance", defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
+  { value: "TRANSFER_IN",    label: "Transfer In",     defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
+  { value: "TRANSFER_OUT",   label: "Transfer Out",    defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
+  { value: "MERGER_IN",      label: "Merger In",       defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
+  { value: "MERGER_OUT",     label: "Merger Out",      defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
+  { value: "SWITCH_IN",      label: "Switch In",       defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
+  { value: "SWITCH_OUT",     label: "Switch Out",      defaultSegment: "DELIVERY",  showPrice: true,  showCharges: false },
 ];
 
 export const TRADE_SEGMENTS = [
@@ -35,4 +41,10 @@ export const TXN_TYPE_COLORS: Record<string, string> = {
   BONUS:           "text-purple-600 dark:text-purple-400",
   SPLIT:           "text-purple-600 dark:text-purple-400",
   OPENING_BALANCE: "text-muted-foreground",
+  TRANSFER_IN:     "text-blue-600 dark:text-blue-400",
+  TRANSFER_OUT:    "text-orange-600 dark:text-orange-400",
+  MERGER_IN:       "text-purple-600 dark:text-purple-400",
+  MERGER_OUT:      "text-purple-600 dark:text-purple-400",
+  SWITCH_IN:       "text-teal-600 dark:text-teal-400",
+  SWITCH_OUT:      "text-teal-600 dark:text-teal-400",
 };

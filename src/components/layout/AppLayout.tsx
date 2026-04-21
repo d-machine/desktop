@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
-import { AppSidebar } from "./AppSidebar";
+import { AppNavbar } from "./AppNavbar";
 import { type Page } from "@/lib/nav";
 
 // Pages
@@ -19,14 +18,14 @@ interface AppLayoutProps {
 
 function PageContent({ page }: { page: Page }) {
   switch (page) {
-    case "dashboard":       return <DashboardPage />;
-    case "holdings":        return <HoldingsPage />;
-    case "transactions":    return <TransactionsPage />;
-    case "capital-gains":   return <CapitalGainsPage />;
-    case "income":          return <IncomePage />;
-    case "asset-allocation":return <AssetAllocationPage />;
-    case "reports":         return <ReportsPage />;
-    case "settings":        return <SettingsPage />;
+    case "dashboard":        return <DashboardPage />;
+    case "holdings":         return <HoldingsPage />;
+    case "transactions":     return <TransactionsPage />;
+    case "capital-gains":    return <CapitalGainsPage />;
+    case "income":           return <IncomePage />;
+    case "asset-allocation": return <AssetAllocationPage />;
+    case "reports":          return <ReportsPage />;
+    case "settings":         return <SettingsPage />;
   }
 }
 
@@ -34,24 +33,15 @@ export function AppLayout({ onLock }: AppLayoutProps) {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
 
   return (
-    <SidebarProvider>
-      <div className="flex h-screen w-full overflow-hidden bg-background">
-        <AppSidebar
-          currentPage={currentPage}
-          onNavigate={setCurrentPage}
-          onLock={onLock}
-        />
-        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          {/* Top bar */}
-          <header className="flex items-center gap-2 px-4 h-12 border-b shrink-0">
-            <SidebarTrigger className="size-7" />
-          </header>
-          {/* Page content */}
-          <main className="flex-1 overflow-y-auto p-6">
-            <PageContent page={currentPage} />
-          </main>
-        </div>
-      </div>
-    </SidebarProvider>
+    <div className="flex flex-col h-screen w-full overflow-hidden bg-background">
+      <AppNavbar
+        currentPage={currentPage}
+        onNavigate={setCurrentPage}
+        onLock={onLock}
+      />
+      <main className="flex-1 overflow-y-auto p-6">
+        <PageContent page={currentPage} />
+      </main>
+    </div>
   );
 }

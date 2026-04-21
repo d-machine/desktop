@@ -68,10 +68,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     }
   };
 
-  // Step 2: create accounts
+  // Step 2: create accounts (optional — skip if none filled in)
   const handleSaveAccounts = async () => {
     const valid = accounts.filter((a) => a.name.trim() && a.account_type);
-    if (valid.length === 0) { setError("Add at least one account"); return; }
+    if (valid.length === 0) { setStep("done"); return; }
 
     setSaving(true);
     setError("");
@@ -157,8 +157,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             <CardHeader>
               <CardTitle>Add your accounts</CardTitle>
               <CardDescription>
-                Add all accounts you want to track — demat, MF folios, FDs, etc.
-                You can add more later.
+                Optionally add accounts now — demat, MF folios, FDs, etc.
+                You can also skip and add them later from Settings.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -194,7 +194,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                   onClick={handleSaveAccounts}
                   disabled={saving}
                 >
-                  {saving ? "Saving…" : "Continue"}
+                  {saving ? "Saving…" : accounts.some(a => a.name.trim() && a.account_type) ? "Save & Continue" : "Skip for now"}
                 </Button>
               </div>
             </CardContent>
@@ -210,8 +210,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
               </div>
               <CardTitle>You're all set!</CardTitle>
               <CardDescription>
-                Your portfolio and accounts have been created.
-                Next, add transactions or import your broker/CAMS statements.
+                Your portfolio has been created.
+                Next, add accounts from Settings, then import your broker or CAMS statements.
               </CardDescription>
             </CardHeader>
             <CardContent>

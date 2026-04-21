@@ -19,7 +19,7 @@
 //! part, financial data, security name BSE code continuation) with Y gaps of
 //! ~4.6 pt — captured by the rolling-window row grouper with tolerance 5 pt.
 
-use crate::{commands::import::pdf_utils, db};
+use crate::{commands::import::{pdf_utils, flag_oversells}, db};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -438,12 +438,6 @@ fn parse_rows(all_cells: Vec<Vec<String>>) -> ParseOutput {
         let sell_qty   = parse_qty(&col4);
         let sell_price = parse_price(&col5);
 
-        // Net columns — fallback when both buy and sell are zero.
-        let net_qty_col: f64   = cells.get(6)
-            .map(|s| s.trim().replace(',', "").parse().unwrap_or(0.0))
-            .unwrap_or(0.0);
-        let net_price_col: f64 = cells.get(7).map(|s| parse_price(s)).unwrap_or(0.0);
-
         if buy_qty > 0.0 && sell_qty == 0.0 {
             trades.push(ParsedEquityTrade {
                 trade_date: date, security_name: cur_security.clone(),
@@ -467,17 +461,6 @@ fn parse_rows(all_cells: Vec<Vec<String>>) -> ParseOutput {
                 trade_date: date, security_name: cur_security.clone(),
                 exchange_code: cur_bse_code.clone(), txn_type: "SELL".to_string(),
                 quantity: sell_qty, price: sell_price, trade_segment: "INTRADAY".to_string(),
-            });
-        } else if net_qty_col != 0.0 && net_price_col > 0.0 {
-            let (txn_type, qty) = if net_qty_col > 0.0 {
-                ("BUY".to_string(), net_qty_col)
-            } else {
-                ("SELL".to_string(), -net_qty_col)
-            };
-            trades.push(ParsedEquityTrade {
-                trade_date: date, security_name: cur_security.clone(),
-                exchange_code: cur_bse_code.clone(), txn_type,
-                quantity: qty, price: net_price_col, trade_segment: "EQ".to_string(),
             });
         } else {
             skipped_details.push(SkippedRow {
@@ -521,10 +504,21 @@ pub fn parse_choice_equity_pdf(file_path: String) -> Result<ChoiceEquityParseRes
 // ─── Import ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
+pub struct SkippedDetail {
+    pub trade_date:    String,
+    pub security_name: String,
+    pub txn_type:      String,
+    pub quantity:      f64,
+    pub price:         f64,
+    pub reason:        String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChoiceEquityImportResult {
-    pub imported: usize,
-    pub skipped: usize,
+    pub imported:                 usize,
+    pub skipped:                  usize,
     pub auto_created_instruments: usize,
+    pub skipped_details:          Vec<SkippedDetail>,
 }
 
 /// Bulk-insert parsed Choice Equity trades into the DB for a given account.
@@ -537,9 +531,10 @@ pub fn import_choice_equity_trades(
     transactions: Vec<ParsedEquityTrade>,
 ) -> Result<ChoiceEquityImportResult, String> {
     let conn = db::acquire()?;
-    let mut imported     = 0usize;
-    let mut skipped      = 0usize;
-    let mut auto_created = 0usize;
+    let mut imported        = 0usize;
+    let mut skipped         = 0usize;
+    let mut auto_created    = 0usize;
+    let mut skipped_details: Vec<SkippedDetail> = Vec::new();
 
     let equity_type_id: i64 = conn
         .query_row(
@@ -594,7 +589,18 @@ pub fn import_choice_equity_trades(
 
         let instrument_id = match instrument_id {
             Some(id) => id,
-            None => { skipped += 1; continue; }
+            None => {
+                skipped += 1;
+                skipped_details.push(SkippedDetail {
+                    trade_date:    trade.trade_date.clone(),
+                    security_name: trade.security_name.clone(),
+                    txn_type:      trade.txn_type.clone(),
+                    quantity:      trade.quantity,
+                    price:         trade.price,
+                    reason:        "Could not create instrument".to_string(),
+                });
+                continue;
+            }
         };
 
         let price_paise = (trade.price * 100.0).round() as i64;
@@ -603,17 +609,28 @@ pub fn import_choice_equity_trades(
             .query_row(
                 "SELECT COUNT(*) FROM transactions
                  WHERE account_id=?1 AND instrument_id=?2 AND trade_date=?3
-                   AND price_paise=?4 AND quantity=?5 AND txn_type=?6 AND trade_segment=?7",
+                   AND price_paise=?4 AND quantity=?5 AND txn_type=?6",
                 rusqlite::params![
                     account_id, instrument_id, trade.trade_date,
-                    price_paise, trade.quantity, trade.txn_type, trade.trade_segment,
+                    price_paise, trade.quantity, trade.txn_type,
                 ],
                 |row| row.get::<_, i64>(0),
             )
             .map(|c| c > 0)
             .unwrap_or(false);
 
-        if exists { skipped += 1; continue; }
+        if exists {
+            skipped += 1;
+            skipped_details.push(SkippedDetail {
+                trade_date:    trade.trade_date.clone(),
+                security_name: trade.security_name.clone(),
+                txn_type:      trade.txn_type.clone(),
+                quantity:      trade.quantity,
+                price:         trade.price,
+                reason:        "Duplicate".to_string(),
+            });
+            continue;
+        }
 
         let qty              = trade.quantity;
         let gross_paise      = (qty * trade.price * 100.0).round() as i64;
@@ -635,7 +652,12 @@ pub fn import_choice_equity_trades(
         imported += 1;
     }
 
-    Ok(ChoiceEquityImportResult { imported, skipped, auto_created_instruments: auto_created })
+    drop(conn); // release before flag pass
+
+    // After inserting all trades, run FIFO simulation to flag any oversells.
+    flag_oversells(account_id)?;
+
+    Ok(ChoiceEquityImportResult { imported, skipped, auto_created_instruments: auto_created, skipped_details })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -704,6 +726,101 @@ mod tests {
         assert_eq!(result.skipped_details.iter()
             .filter(|r| r.security_name.to_lowercase().contains("bhartiya"))
             .count(), 0, "no Bhartiya rows should be skipped");
+    }
+
+    #[test]
+    fn test_tata_motors() {
+        if !std::path::Path::new(PDF_PATH).exists() { return; }
+        let result = parse();
+        // Dump ALL securities that contain "tata" or "passenger"
+        let relevant: Vec<_> = result.transactions.iter()
+            .filter(|t| t.security_name.to_lowercase().contains("tata motor")
+                     || t.security_name.to_lowercase().contains("passenger"))
+            .collect();
+        let mut by_sec: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for t in &relevant { *by_sec.entry(&t.security_name).or_default() += 1; }
+        for (sec, count) in &by_sec {
+            println!("  {} → {} txns", sec, count);
+        }
+
+        // Also dump raw cells for "tata motors" and "passenger"
+        let all_pages: Vec<Vec<pdf_utils::TextSpan>> = pdf_utils::extract_all_page_spans(PDF_PATH).expect("extract failed");
+        let all_cells: Vec<Vec<String>> = all_pages
+            .into_iter()
+            .flat_map(|page: Vec<pdf_utils::TextSpan>| {
+                pdf_utils::page_spans_to_rows(page, 5.0)
+                    .into_iter()
+                    .filter(|r| !r.is_empty())
+                    .map(|r| {
+                        let mut cells = pdf_utils::spans_to_cells(&r, &EQ_COL_X);
+                        cells.resize(9, String::new());
+                        cells
+                    })
+            })
+            .collect();
+        for (i, row) in all_cells.iter().enumerate() {
+            if row.iter().any(|c: &String| {
+                let lc = c.to_lowercase();
+                lc.contains("tata motor") || lc.contains("passenger")
+            }) {
+                let start = i.saturating_sub(1);
+                let end = (i + 3).min(all_cells.len());
+                for j in start..end {
+                    let m = if j == i { ">>>" } else { "   " };
+                    println!("{} [{:04}] {:?}", m, j, all_cells[j]);
+                }
+                println!("---");
+            }
+        }
+    }
+
+    #[test]
+    fn test_irfc() {
+        if !std::path::Path::new(PDF_PATH).exists() { return; }
+        let result = parse();
+        let irfc: Vec<_> = result.transactions.iter()
+            .filter(|t| t.security_name.to_lowercase().contains("indian railway"))
+            .collect();
+        println!("IRFC transactions ({}):", irfc.len());
+        for t in &irfc {
+            println!("  {} | {} | {} | qty={} @ price={}", t.trade_date, t.txn_type, t.trade_segment, t.quantity, t.price);
+        }
+        // Show manual FIFO avg
+        let mut lots: Vec<(f64, f64)> = vec![]; // (price, qty)
+        for t in &irfc {
+            if t.txn_type == "BUY" && t.trade_segment != "INTRADAY" {
+                lots.push((t.price, t.quantity));
+            } else if t.txn_type == "SELL" && t.trade_segment != "INTRADAY" {
+                let mut qty = t.quantity;
+                for lot in lots.iter_mut() {
+                    if qty <= 0.0001 { break; }
+                    let matched = qty.min(lot.1);
+                    lot.1 -= matched;
+                    qty -= matched;
+                }
+                if qty > 0.0001 { println!("  [WARN] unmatched sell qty={}", qty); }
+            }
+        }
+        let rem_qty: f64 = lots.iter().map(|l| l.1).sum();
+        let rem_cost: f64 = lots.iter().map(|l| l.0 * l.1).sum();
+        println!("FIFO result: qty={} avg={:.2}", rem_qty, if rem_qty > 0.0 { rem_cost / rem_qty } else { 0.0 });
+        println!("Remaining lots: {:?}", lots.iter().filter(|l| l.1 > 0.0001).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_icici_peek() {
+        let path = "/home/dmachine/workspace/TRX-Equity_10-04-2025_1498546.PDF";
+        if !std::path::Path::new(path).exists() { return; }
+        let pages = pdf_utils::extract_all_page_spans(path).expect("extract failed");
+        println!("Pages: {}", pages.len());
+        for (pi, page) in pages.iter().enumerate().take(2) {
+            println!("\n=== PAGE {} ({} spans) ===", pi + 1, page.len());
+            let rows = pdf_utils::page_spans_to_rows(page.clone(), 3.0);
+            for row in &rows {
+                let texts: Vec<_> = row.iter().map(|s| format!("x={:.0} {:?}", s.x, s.text)).collect();
+                println!("  ROW y={:.0}: {}", row[0].y, texts.join(" | "));
+            }
+        }
     }
 
     #[test]

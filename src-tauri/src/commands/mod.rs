@@ -1,4 +1,5 @@
 pub mod account;
+pub mod prices;
 pub mod auth;
 pub mod backup;
 pub mod holdings;

@@ -7,6 +7,7 @@ pub struct Holding {
     pub instrument_id: i64,
     pub instrument_name: String,
     pub isin: Option<String>,
+    pub instrument_type: String,
     pub asset_class: String,
     pub account_id: i64,
     pub account_name: String,
@@ -40,6 +41,7 @@ struct TxnRow {
     instrument_id: i64,
     instrument_name: String,
     isin: Option<String>,
+    instrument_type: String,
     asset_class: String,
     trade_date: String,
     trade_segment: String,
@@ -62,17 +64,18 @@ struct PositionMeta {
     portfolio_id: i64,
     instrument_name: String,
     isin: Option<String>,
+    instrument_type: String,
     asset_class: String,
     current_price: Option<i64>,
     price_date: Option<String>,
 }
 
 fn is_buy(t: &str) -> bool {
-    matches!(t, "BUY" | "SIP" | "OPENING_BALANCE" | "BONUS" | "MERGER_IN" | "SWITCH_IN")
+    matches!(t, "BUY" | "SIP" | "OPENING_BALANCE" | "BONUS" | "MERGER_IN" | "SWITCH_IN" | "TRANSFER_IN")
 }
 
 fn is_sell(t: &str) -> bool {
-    matches!(t, "SELL" | "REDEMPTION" | "MERGER_OUT" | "SWITCH_OUT")
+    matches!(t, "SELL" | "REDEMPTION" | "MERGER_OUT" | "SWITCH_OUT" | "TRANSFER_OUT")
 }
 
 /// Compute current holdings using FIFO lot matching.
@@ -82,63 +85,90 @@ fn is_sell(t: &str) -> bool {
 ///   - If intraday sells > buys on a given day, the excess becomes a delivery SELL.
 /// This means only the imbalance of intraday activity affects the held position.
 #[tauri::command]
-pub fn get_holdings(account_ids: Option<Vec<i64>>) -> Result<Vec<Holding>, String> {
+pub fn get_holdings(
+    account_ids:   Option<Vec<i64>>,
+    portfolio_ids: Option<Vec<i64>>,
+    asset_classes: Option<Vec<String>>,
+) -> Result<Vec<Holding>, String> {
     let conn = db::acquire()?;
 
-    let account_filter = match &account_ids {
-        Some(ids) if !ids.is_empty() => {
-            let placeholders = ids.iter().enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
-                .collect::<Vec<_>>().join(",");
-            format!("AND t.account_id IN ({})", placeholders)
+    // Build WHERE clauses and accumulate bound params
+    let mut filters: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(ids) = &account_ids {
+        if !ids.is_empty() {
+            let ph = (1..=ids.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            filters.push(format!("t.account_id IN ({ph})"));
+            params.extend(ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>));
         }
-        _ => String::new(),
+    }
+
+    if let Some(pids) = &portfolio_ids {
+        if !pids.is_empty() {
+            let base = params.len() + 1;
+            let ph = (base..base + pids.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            filters.push(format!("a.portfolio_id IN ({ph})"));
+            params.extend(pids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>));
+        }
+    }
+
+    if let Some(classes) = &asset_classes {
+        if !classes.is_empty() {
+            let base = params.len() + 1;
+            let ph = (base..base + classes.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            filters.push(format!("it.asset_class IN ({ph})"));
+            params.extend(classes.iter().map(|c| Box::new(c.clone()) as Box<dyn rusqlite::ToSql>));
+        }
+    }
+
+    let extra = if filters.is_empty() {
+        String::new()
+    } else {
+        format!("AND {}", filters.join(" AND "))
     };
 
     let sql = format!(
         "SELECT t.txn_id, t.account_id, a.name, a.portfolio_id,
-                t.instrument_id, i.name, i.isin, it.asset_class,
+                t.instrument_id, i.name, i.isin,
+                it.name, it.asset_class,
                 t.trade_date, t.trade_segment,
                 t.txn_type, t.quantity, t.price_paise,
                 lp.close_price_paise, lp.price_date
          FROM transactions t
-         JOIN accounts a          ON t.account_id        = a.account_id
-         JOIN instruments i       ON t.instrument_id     = i.instrument_id
+         JOIN accounts a          ON t.account_id         = a.account_id
+         JOIN instruments i       ON t.instrument_id      = i.instrument_id
          JOIN instrument_types it ON i.instrument_type_id = it.instrument_type_id
-         LEFT JOIN latest_prices lp ON lp.instrument_id  = t.instrument_id
+         LEFT JOIN latest_prices lp ON lp.instrument_id   = t.instrument_id
          WHERE t.txn_type IN (
-             'BUY','SIP','OPENING_BALANCE','BONUS','MERGER_IN','SWITCH_IN',
-             'SELL','REDEMPTION','MERGER_OUT','SWITCH_OUT'
+             'BUY','SIP','OPENING_BALANCE','BONUS','MERGER_IN','SWITCH_IN','TRANSFER_IN',
+             'SELL','REDEMPTION','MERGER_OUT','SWITCH_OUT','TRANSFER_OUT'
          )
-         {account_filter}
+         AND (t.flag IS NULL OR t.flag_dismissed = 1)
+         {extra}
          ORDER BY t.account_id, t.instrument_id, t.trade_date ASC, t.txn_id ASC"
     );
-
-    let params: Vec<Box<dyn rusqlite::ToSql>> = match &account_ids {
-        Some(ids) if !ids.is_empty() =>
-            ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>).collect(),
-        _ => vec![],
-    };
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows: Vec<TxnRow> = stmt.query_map(
         rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         |row| Ok(TxnRow {
-            txn_id:         row.get(0)?,
-            account_id:     row.get(1)?,
-            account_name:   row.get(2)?,
-            portfolio_id:   row.get(3)?,
-            instrument_id:  row.get(4)?,
+            txn_id:          row.get(0)?,
+            account_id:      row.get(1)?,
+            account_name:    row.get(2)?,
+            portfolio_id:    row.get(3)?,
+            instrument_id:   row.get(4)?,
             instrument_name: row.get(5)?,
-            isin:           row.get(6)?,
-            asset_class:    row.get(7)?,
-            trade_date:     row.get(8)?,
-            trade_segment:  row.get(9)?,
-            txn_type:       row.get(10)?,
-            quantity:       row.get(11)?,
-            price_paise:    row.get(12)?,
-            current_price:  row.get(13)?,
-            price_date:     row.get(14)?,
+            isin:            row.get(6)?,
+            instrument_type: row.get(7)?,
+            asset_class:     row.get(8)?,
+            trade_date:      row.get(9)?,
+            trade_segment:   row.get(10)?,
+            txn_type:        row.get(11)?,
+            quantity:        row.get(12)?,
+            price_paise:     row.get(13)?,
+            current_price:   row.get(14)?,
+            price_date:      row.get(15)?,
         }),
     )
     .map_err(|e| e.to_string())?
@@ -161,6 +191,7 @@ pub fn get_holdings(account_ids: Option<Vec<i64>>) -> Result<Vec<Holding>, Strin
                 portfolio_id:    row.portfolio_id,
                 instrument_name: row.instrument_name.clone(),
                 isin:            row.isin.clone(),
+                instrument_type: row.instrument_type.clone(),
                 asset_class:     row.asset_class.clone(),
                 current_price:   row.current_price,
                 price_date:      row.price_date.clone(),
@@ -221,6 +252,7 @@ pub fn get_holdings(account_ids: Option<Vec<i64>>) -> Result<Vec<Holding>, Strin
                 instrument_id,
                 instrument_name:      meta.instrument_name,
                 isin:                 meta.isin,
+                instrument_type:      meta.instrument_type,
                 asset_class:          meta.asset_class,
                 quantity:             remaining_qty,
                 avg_cost_paise,
@@ -303,13 +335,14 @@ fn net_intraday(rows: Vec<TxnRow>) -> Vec<TxnRow> {
         for lot in &lots {
             if lot.remaining_qty > 0.0001 {
                 temp.push(TxnRow {
-                    txn_id:         meta.txn_id, // stable for sorting; exact value irrelevant
+                    txn_id:          meta.txn_id,
                     account_id,
                     account_name:    meta.account_name.clone(),
                     portfolio_id:    meta.portfolio_id,
                     instrument_id,
                     instrument_name: meta.instrument_name.clone(),
                     isin:            meta.isin.clone(),
+                    instrument_type: meta.instrument_type.clone(),
                     asset_class:     meta.asset_class.clone(),
                     trade_date:      trade_date.clone(),
                     trade_segment:   "INTRADAY_NET".to_string(),
@@ -325,13 +358,14 @@ fn net_intraday(rows: Vec<TxnRow>) -> Vec<TxnRow> {
         // Emit one synthetic SELL for excess sell qty
         if excess_sell_qty > 0.0001 {
             temp.push(TxnRow {
-                txn_id:         meta.txn_id,
+                txn_id:          meta.txn_id,
                 account_id,
                 account_name:    meta.account_name.clone(),
                 portfolio_id:    meta.portfolio_id,
                 instrument_id,
                 instrument_name: meta.instrument_name.clone(),
                 isin:            meta.isin.clone(),
+                instrument_type: meta.instrument_type.clone(),
                 asset_class:     meta.asset_class.clone(),
                 trade_date:      trade_date.clone(),
                 trade_segment:   "INTRADAY_NET".to_string(),
@@ -357,8 +391,12 @@ fn net_intraday(rows: Vec<TxnRow>) -> Vec<TxnRow> {
 
 /// Portfolio-level summary aggregated from holdings.
 #[tauri::command]
-pub fn get_portfolio_summary(account_ids: Option<Vec<i64>>) -> Result<PortfolioSummary, String> {
-    let holdings = get_holdings(account_ids)?;
+pub fn get_portfolio_summary(
+    account_ids:   Option<Vec<i64>>,
+    portfolio_ids: Option<Vec<i64>>,
+    asset_classes: Option<Vec<String>>,
+) -> Result<PortfolioSummary, String> {
+    let holdings = get_holdings(account_ids, portfolio_ids, asset_classes)?;
 
     let total_invested = holdings.iter().map(|h| h.total_cost_paise).sum::<i64>();
     let holdings_count = holdings.len() as i64;

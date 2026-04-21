@@ -389,4 +389,131 @@ pub const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX IF NOT EXISTS idx_instrument_equity_bse_code
         ON instrument_equity(bse_code) WHERE bse_code IS NOT NULL;
     ",
+
+    // -------------------------------------------------------------------------
+    // M009 — Transaction flags, transfer support
+    // -------------------------------------------------------------------------
+    "
+    -- Flag a transaction without deleting it.
+    -- flag values: 'OVERSELL' | 'UNMATCHED_INSTRUMENT' | 'DUPLICATE_SUSPECTED' | 'USER_FLAGGED'
+    -- Flagged + not dismissed → excluded from FIFO / portfolio calculations.
+    -- Flagged + dismissed     → treated as clean (user has acknowledged the issue).
+    ALTER TABLE transactions ADD COLUMN flag           TEXT    DEFAULT NULL;
+    ALTER TABLE transactions ADD COLUMN flag_reason    TEXT    DEFAULT NULL;
+    ALTER TABLE transactions ADD COLUMN flag_dismissed INTEGER NOT NULL DEFAULT 0;
+
+    -- Links the two sides of an account-to-account security transfer.
+    -- Both TRANSFER_OUT and TRANSFER_IN rows share the same transfer_pair_id.
+    ALTER TABLE transactions ADD COLUMN transfer_pair_id INTEGER DEFAULT NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_instrument_equity_nse_symbol
+        ON instrument_equity(nse_symbol) WHERE nse_symbol IS NOT NULL;
+    ",
+
+    // -------------------------------------------------------------------------
+    // M010 — latest_prices OHLC columns
+    // -------------------------------------------------------------------------
+    "
+    ALTER TABLE latest_prices ADD COLUMN open_price_paise  INTEGER;
+    ALTER TABLE latest_prices ADD COLUMN high_price_paise  INTEGER;
+    ALTER TABLE latest_prices ADD COLUMN low_price_paise   INTEGER;
+    ",
+
+    // -------------------------------------------------------------------------
+    // M011 — Instrument resolution status
+    // Tracks whether a client instrument has been matched against the server
+    // instrument catalog.
+    // Values: 'PENDING' | 'RESOLVED' | 'UNMATCHED'
+    // -------------------------------------------------------------------------
+    "
+    ALTER TABLE instruments ADD COLUMN resolution_status TEXT NOT NULL DEFAULT 'PENDING';
+    UPDATE instruments SET resolution_status = 'RESOLVED' WHERE isin IS NOT NULL;
+    ",
+
+    // -------------------------------------------------------------------------
+    // M012 — Drop transfer_pair_id; broker_ref is now the sole reference column.
+    // broker_ref carries both broker-assigned IDs (for dedup) and transfer pair
+    // linkage (generated as 'TRF-{timestamp_ms}' for manual transfers).
+    // -------------------------------------------------------------------------
+    "
+    UPDATE transactions
+    SET broker_ref = 'TRF-' || transfer_pair_id
+    WHERE txn_type IN ('TRANSFER_IN', 'TRANSFER_OUT')
+      AND transfer_pair_id IS NOT NULL
+      AND (broker_ref IS NULL OR broker_ref = '');
+
+    CREATE TABLE transactions_new (
+        txn_id              INTEGER PRIMARY KEY,
+        account_id          INTEGER NOT NULL REFERENCES accounts(account_id),
+        instrument_id       INTEGER NOT NULL REFERENCES instruments(instrument_id),
+        txn_type            TEXT NOT NULL,
+        trade_date          TEXT NOT NULL,
+        txn_time            TEXT,
+        trade_segment       TEXT NOT NULL DEFAULT 'DELIVERY',
+        quantity            REAL NOT NULL,
+        price_paise         INTEGER NOT NULL,
+        brokerage_paise     INTEGER NOT NULL DEFAULT 0,
+        stt_paise           INTEGER NOT NULL DEFAULT 0,
+        other_charges_paise INTEGER NOT NULL DEFAULT 0,
+        total_value_paise   INTEGER NOT NULL,
+        notes               TEXT,
+        broker_ref          TEXT,
+        batch_id            INTEGER REFERENCES import_batches(batch_id),
+        created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+        flag                TEXT,
+        flag_reason         TEXT,
+        flag_dismissed      INTEGER NOT NULL DEFAULT 0
+    );
+
+    INSERT INTO transactions_new
+        SELECT txn_id, account_id, instrument_id, txn_type, trade_date, txn_time,
+               trade_segment, quantity, price_paise, brokerage_paise, stt_paise,
+               other_charges_paise, total_value_paise, notes, broker_ref, batch_id,
+               created_at, flag, flag_reason, flag_dismissed
+        FROM transactions;
+
+    DROP TABLE transactions;
+    ALTER TABLE transactions_new RENAME TO transactions;
+
+    CREATE INDEX idx_transactions_account    ON transactions(account_id);
+    CREATE INDEX idx_transactions_instrument ON transactions(instrument_id);
+    CREATE INDEX idx_transactions_trade_date ON transactions(trade_date);
+    CREATE INDEX idx_transactions_broker_ref ON transactions(broker_ref);
+    CREATE UNIQUE INDEX idx_transactions_dedup ON transactions(account_id, broker_ref)
+        WHERE broker_ref IS NOT NULL;
+    ",
+
+    // -------------------------------------------------------------------------
+    // M013 — New instrument types + import_batches charge columns
+    // -------------------------------------------------------------------------
+    "
+    INSERT INTO instrument_types (name, asset_class, tax_category) VALUES
+        ('SIF',             'MF',           'EQUITY_LTCG'),
+        ('BANK',            'FIXED_INCOME', 'DEBT'),
+        ('NPS_ULIP',        'FIXED_INCOME', 'DEBT'),
+        ('INSURANCE',       'INSURANCE',    'DEBT'),
+        ('PRIVATE_EQUITY',  'EQUITY',       'EQUITY_LTCG'),
+        ('TRADED_BONDS',    'FIXED_INCOME', 'DEBT'),
+        ('NCD',             'FIXED_INCOME', 'DEBT'),
+        ('DEPOSITS_LOANS',  'FIXED_INCOME', 'DEBT'),
+        ('PPF_EPF',         'FIXED_INCOME', 'DEBT'),
+        ('POST_OFFICE',     'FIXED_INCOME', 'DEBT'),
+        ('GOLD',            'COMMODITY',    'DEBT'),
+        ('SILVER',          'COMMODITY',    'DEBT'),
+        ('JEWELLERY',       'COMMODITY',    'DEBT'),
+        ('PROPERTY',        'REAL_ESTATE',  'DEBT'),
+        ('ART',             'ALTERNATIVES', 'DEBT'),
+        ('AIF',             'ALTERNATIVES', 'EQUITY_LTCG'),
+        ('LOANS',           'FIXED_INCOME', 'DEBT');
+
+    ALTER TABLE import_batches ADD COLUMN ref_no               TEXT;
+    ALTER TABLE import_batches ADD COLUMN broker               TEXT;
+    ALTER TABLE import_batches ADD COLUMN batch_trade_date     TEXT;
+    ALTER TABLE import_batches ADD COLUMN stt_paise            INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE import_batches ADD COLUMN stamp_charges_paise  INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE import_batches ADD COLUMN gst_paise            INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE import_batches ADD COLUMN trans_charges_paise  INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE import_batches ADD COLUMN other_charges_paise  INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE import_batches ADD COLUMN total_payable_paise  INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
