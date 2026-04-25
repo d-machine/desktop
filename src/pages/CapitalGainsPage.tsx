@@ -4,7 +4,8 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, type ColumnDef, type SortingState,
 } from "@tanstack/react-table";
-import { ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { ArrowUp, ArrowDown, ArrowUpDown, Download } from "lucide-react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatINR, formatDate, formatQty } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -93,6 +94,7 @@ export function CapitalGainsPage() {
   const [loading, setLoading] = useState(true);
   const [selectedFY, setSelectedFY] = useState<string>("");
   const [sorting, setSorting] = useState<SortingState>([{ id: "sell_date", desc: true }]);
+  const [exporting, setExporting] = useState(false);
 
   const load = async (fy?: string) => {
     setLoading(true);
@@ -115,6 +117,21 @@ export function CapitalGainsPage() {
   const handleFYChange = (fy: string) => {
     setSelectedFY(fy);
     load(fy);
+  };
+
+  const handleExport = async () => {
+    if (!selectedFY) return;
+    const path = await save({
+      defaultPath: `Tax_Report_FY_${selectedFY}.xlsx`,
+      filters: [{ name: "Excel Workbook", extensions: ["xlsx"] }],
+    });
+    if (!path) return;
+    setExporting(true);
+    try {
+      await invoke("export_tax_report", { fy: selectedFY, path });
+    } finally {
+      setExporting(false);
+    }
   };
 
   const summary = useMemo(
@@ -229,21 +246,31 @@ export function CapitalGainsPage() {
           <p className="text-sm text-muted-foreground">FIFO-matched realised gains for ITR filing</p>
         </div>
         {(report?.all_fys.length ?? 0) > 0 && (
-          <div className="flex gap-1.5 flex-wrap justify-end">
-            {report!.all_fys.map((fy) => (
-              <button
-                key={fy}
-                onClick={() => handleFYChange(fy)}
-                className={cn(
-                  "px-3 py-1 rounded-full text-xs font-medium border transition-colors",
-                  selectedFY === fy
-                    ? "bg-primary text-primary-foreground border-primary"
-                    : "bg-background text-muted-foreground border-border hover:border-foreground/30"
-                )}
-              >
-                FY {fy}
-              </button>
-            ))}
+          <div className="flex items-center gap-3 flex-wrap justify-end">
+            <div className="flex gap-1.5 flex-wrap justify-end">
+              {report!.all_fys.map((fy) => (
+                <button
+                  key={fy}
+                  onClick={() => handleFYChange(fy)}
+                  className={cn(
+                    "px-3 py-1 rounded-full text-xs font-medium border transition-colors",
+                    selectedFY === fy
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-background text-muted-foreground border-border hover:border-foreground/30"
+                  )}
+                >
+                  FY {fy}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={handleExport}
+              disabled={exporting || !selectedFY}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium bg-background hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Download className="size-3.5" />
+              {exporting ? "Exporting…" : "Download Excel"}
+            </button>
           </div>
         )}
       </div>

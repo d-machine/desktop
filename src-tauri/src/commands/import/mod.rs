@@ -1,4 +1,5 @@
 pub mod angel_one;
+pub mod cams_cas;
 pub mod choice_equity;
 pub mod choice_mf;
 pub mod icici_equity;
@@ -17,8 +18,9 @@ pub struct ImportSource {
 #[tauri::command]
 pub fn get_import_sources() -> Vec<ImportSource> {
     vec![
-        ImportSource { value: "ANGELONE",      label: "Angel One — Trades & Charges",   description: ".xlsx from Angel One back-office"                },
-        ImportSource { value: "CHOICE_MF",     label: "Choice Wealth — MF Statement",   description: ".pdf from Choice Wealth MF portal"               },
+        ImportSource { value: "ANGELONE",      label: "Angel One — Trades & Charges",        description: ".xlsx from Angel One back-office"              },
+        ImportSource { value: "CAMS_CAS",      label: "CAMS — Consolidated Account Statement", description: ".pdf CAS from mycams.com (all AMCs)"         },
+        ImportSource { value: "CHOICE_MF",     label: "Choice Wealth — MF Statement",        description: ".pdf from Choice Wealth MF portal"             },
         ImportSource { value: "CHOICE_EQUITY", label: "Choice Equity — Global Details", description: ".pdf Global Details Report from Choice Equity"   },
         ImportSource { value: "ICICI_EQUITY",  label: "ICICI Securities — Equity TRX",  description: ".pdf TRX-Equity statement from ICICI Securities"  },
     ]

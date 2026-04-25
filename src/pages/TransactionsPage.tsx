@@ -514,8 +514,6 @@ export function TransactionsPage() {
         onImported={() => {
           invoke<Account[]>("get_accounts", { portfolioId: null }).then(setAccounts);
           load(activeAccountIds);
-          // Resolve new instruments against server catalog (fills ISINs, merges duplicates),
-          // then sync prices for anything that got resolved.
           invoke("resolve_instruments")
             .catch(() => {})
             .then(() => invoke("sync_prices", { force: true }).catch(() => {}));

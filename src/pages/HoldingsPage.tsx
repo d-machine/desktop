@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
@@ -137,7 +137,7 @@ const TXN_TYPE_COLORS: Record<string, string> = {
 
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
-export function HoldingsPage() {
+export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: number } = {}) {
   const [holdings, setHoldings]       = useState<Holding[]>([]);
   const [summary, setSummary]         = useState<PortfolioSummary | null>(null);
   const [loading, setLoading]         = useState(true);
@@ -269,6 +269,17 @@ export function HoldingsPage() {
       setDrawerLoading(false);
     }
   };
+
+  // Auto-open drawer when navigated from dashboard with a pre-selected instrument
+  const autoOpenedRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!initialInstrumentId || initialInstrumentId === autoOpenedRef.current || holdings.length === 0) return;
+    const h = holdings.find(h => h.instrument_id === initialInstrumentId);
+    if (h) {
+      autoOpenedRef.current = initialInstrumentId;
+      openDrawer(h);
+    }
+  }, [initialInstrumentId, holdings]);
 
   const openBatch = async (batchId: number) => {
     setBatchLoading(true);

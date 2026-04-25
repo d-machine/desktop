@@ -63,8 +63,11 @@ pub fn run() {
             // Reports
             commands::reports::get_capital_gains,
             commands::reports::get_income,
+            commands::reports::export_tax_report,
             // Import parsers
             commands::import::get_import_sources,
+            commands::import::cams_cas::parse_cams_cas_pdf,
+            commands::import::cams_cas::import_cams_cas,
             commands::import::angel_one::parse_angel_one_xlsx,
             commands::import::angel_one::import_angel_one_trades,
             commands::import::choice_mf::parse_choice_mf_pdf,

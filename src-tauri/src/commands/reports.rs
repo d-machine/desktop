@@ -1,4 +1,5 @@
 use crate::db;
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, Color};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -24,7 +25,7 @@ pub struct CapitalGainLot {
     pub fy: String,             // e.g. "2024-25"
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct CapitalGainsSummary {
     pub fy: String,
     pub stcg_equity_paise: i64,
@@ -420,6 +421,159 @@ pub fn get_income(
     };
 
     Ok(IncomeReport { events: filtered, summaries, all_fys })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Excel Tax Report Export
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Export a full tax report for the given FY to an Excel file at `path`.
+/// Sheets: (1) CG Summary, (2) Capital Gains Lots, (3) Income.
+#[tauri::command]
+pub fn export_tax_report(fy: String, path: String) -> Result<(), String> {
+    // Fetch data
+    let cg = get_capital_gains(Some(fy.clone()), None)?;
+    let income = get_income(Some(fy.clone()), None)?;
+    let cg_summary = cg.summaries.iter().find(|s| s.fy == fy).cloned()
+        .unwrap_or(CapitalGainsSummary {
+            fy: fy.clone(),
+            stcg_equity_paise: 0, ltcg_equity_paise: 0,
+            stcg_debt_paise: 0, ltcg_debt_paise: 0,
+            speculative_paise: 0, non_speculative_paise: 0,
+            total_gain_paise: 0,
+        });
+
+    // ── Formats ──────────────────────────────────────────────────────────────
+    let hdr = Format::new()
+        .set_bold()
+        .set_background_color(Color::RGB(0x1e293b))
+        .set_font_color(Color::RGB(0xf8fafc))
+        .set_border(FormatBorder::Thin)
+        .set_align(FormatAlign::Center);
+
+    let label = Format::new()
+        .set_bold()
+        .set_background_color(Color::RGB(0xf1f5f9))
+        .set_border(FormatBorder::Thin);
+
+    let money = Format::new()
+        .set_num_format("₹#,##0.00")
+        .set_border(FormatBorder::Thin);
+
+    let money_pos = Format::new()
+        .set_num_format("₹#,##0.00")
+        .set_font_color(Color::RGB(0x16a34a))
+        .set_bold()
+        .set_border(FormatBorder::Thin);
+
+    let money_neg = Format::new()
+        .set_num_format("₹#,##0.00")
+        .set_font_color(Color::RGB(0xdc2626))
+        .set_bold()
+        .set_border(FormatBorder::Thin);
+
+    let cell = Format::new().set_border(FormatBorder::Thin);
+    let date_fmt = Format::new().set_num_format("DD-MMM-YYYY").set_border(FormatBorder::Thin);
+    let num_fmt = Format::new().set_num_format("#,##0.####").set_border(FormatBorder::Thin);
+
+    let paise_to_rupees = |p: i64| p as f64 / 100.0;
+
+    let mut wb = Workbook::new();
+
+    // ── Sheet 1: Capital Gains Summary ───────────────────────────────────────
+    {
+        let ws = wb.add_worksheet();
+        ws.set_name("CG Summary").map_err(|e| e.to_string())?;
+        ws.set_column_width(0, 30).map_err(|e| e.to_string())?;
+        ws.set_column_width(1, 18).map_err(|e| e.to_string())?;
+
+        ws.write_with_format(0, 0, format!("Capital Gains Summary – FY {fy}"), &Format::new().set_bold().set_font_size(13))
+            .map_err(|e| e.to_string())?;
+
+        let rows: &[(&str, i64)] = &[
+            ("STCG – Equity",        cg_summary.stcg_equity_paise),
+            ("LTCG – Equity",        cg_summary.ltcg_equity_paise),
+            ("STCG – Debt",          cg_summary.stcg_debt_paise),
+            ("LTCG – Debt",          cg_summary.ltcg_debt_paise),
+            ("Speculative Gains",    cg_summary.speculative_paise),
+            ("Non-Speculative Gains",cg_summary.non_speculative_paise),
+            ("Total Realized Gain",  cg_summary.total_gain_paise),
+        ];
+
+        for (i, (lbl, paise)) in rows.iter().enumerate() {
+            let r = (i + 2) as u32;
+            let rupees = paise_to_rupees(*paise);
+            let fmt = if *lbl == "Total Realized Gain" {
+                if rupees >= 0.0 { &money_pos } else { &money_neg }
+            } else { &money };
+            ws.write_with_format(r, 0, *lbl, &label).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 1, rupees, fmt).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // ── Sheet 2: Capital Gains Lots ───────────────────────────────────────────
+    {
+        let ws = wb.add_worksheet();
+        ws.set_name("CG Details").map_err(|e| e.to_string())?;
+
+        let headers = ["Instrument", "ISIN", "Account", "Type", "Asset Class",
+                       "Buy Date", "Sell Date", "Hold Days", "Qty",
+                       "Buy Price (₹)", "Sell Price (₹)", "Cost (₹)", "Proceeds (₹)", "Gain (₹)", "Gain Type"];
+        let widths = [28.0, 14.0, 18.0, 14.0, 14.0, 13.0, 13.0, 10.0, 10.0, 14.0, 14.0, 14.0, 14.0, 14.0, 16.0];
+        for (i, (h, w)) in headers.iter().zip(widths.iter()).enumerate() {
+            ws.set_column_width(i as u16, *w).map_err(|e| e.to_string())?;
+            ws.write_with_format(0, i as u16, *h, &hdr).map_err(|e| e.to_string())?;
+        }
+        ws.set_row_height(0, 18.0).map_err(|e| e.to_string())?;
+
+        for (i, lot) in cg.lots.iter().enumerate() {
+            let r = (i + 1) as u32;
+            let gain_fmt = if lot.gain_paise >= 0 { &money_pos } else { &money_neg };
+            ws.write_with_format(r, 0,  &lot.instrument_name, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 1,  lot.isin.as_deref().unwrap_or(""), &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 2,  &lot.account_name, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 3,  &lot.tax_category, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 4,  &lot.asset_class, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 5,  &lot.buy_date, &date_fmt).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 6,  &lot.sell_date, &date_fmt).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 7,  lot.holding_days, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 8,  lot.quantity, &num_fmt).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 9,  paise_to_rupees(lot.buy_price_paise), &money).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 10, paise_to_rupees(lot.sell_price_paise), &money).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 11, paise_to_rupees(lot.cost_paise), &money).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 12, paise_to_rupees(lot.proceeds_paise), &money).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 13, paise_to_rupees(lot.gain_paise), gain_fmt).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 14, &lot.gain_type, &cell).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // ── Sheet 3: Income ───────────────────────────────────────────────────────
+    {
+        let ws = wb.add_worksheet();
+        ws.set_name("Income").map_err(|e| e.to_string())?;
+
+        let headers = ["Date", "Instrument", "ISIN", "Account", "Type", "Amount (₹)", "Notes"];
+        let widths = [13.0, 28.0, 14.0, 18.0, 12.0, 14.0, 30.0];
+        for (i, (h, w)) in headers.iter().zip(widths.iter()).enumerate() {
+            ws.set_column_width(i as u16, *w).map_err(|e| e.to_string())?;
+            ws.write_with_format(0, i as u16, *h, &hdr).map_err(|e| e.to_string())?;
+        }
+        ws.set_row_height(0, 18.0).map_err(|e| e.to_string())?;
+
+        for (i, ev) in income.events.iter().enumerate() {
+            let r = (i + 1) as u32;
+            ws.write_with_format(r, 0, &ev.trade_date, &date_fmt).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 1, &ev.instrument_name, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 2, ev.isin.as_deref().unwrap_or(""), &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 3, &ev.account_name, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 4, &ev.income_type, &cell).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 5, paise_to_rupees(ev.amount_paise), &money_pos).map_err(|e| e.to_string())?;
+            ws.write_with_format(r, 6, ev.notes.as_deref().unwrap_or(""), &cell).map_err(|e| e.to_string())?;
+        }
+    }
+
+    wb.save(&path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn chrono_today() -> String {

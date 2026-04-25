@@ -33,7 +33,7 @@ interface ImportDialogProps {
 }
 
 type Step = "pick" | "account" | "preview" | "fix" | "importing" | "done";
-type ImportSource = "ANGELONE" | "CHOICE_MF" | "CHOICE_EQUITY" | "ICICI_EQUITY";
+type ImportSource = "ANGELONE" | "CHOICE_MF" | "CHOICE_EQUITY" | "ICICI_EQUITY" | "CAMS_CAS";
 
 interface AngelOneParsed {
   trades: AngelOneTrade[];
@@ -129,6 +129,32 @@ interface IciciContractNoteCharges {
 
 type AnyParsed = AngelOneParsed | ChoiceMfParsed | ChoiceEquityParsed | IciciEquityParsed;
 
+interface CasTransaction {
+  date: string; description: string; txn_type: string;
+  amount_rs: number; units: number; nav_rs: number; unit_balance: number;
+  stamp_duty_rs: number; stt_rs: number;
+}
+interface CasFundPreview {
+  amc: string; scheme: string; isin: string; folio: string; pan: string;
+  opening_balance: number; closing_balance: number; transactions: CasTransaction[];
+}
+interface CasFundAssignment {
+  portfolio_id: number;
+  fund: CasFundPreview;
+}
+interface CasPreview {
+  investor_name: string; pan: string; period_from: string; period_to: string;
+  funds: CasFundPreview[]; total_transactions: number;
+}
+interface CasImportFundResult {
+  isin: string; scheme: string; folio: string; pan: string;
+  transactions_imported: number; transactions_skipped: number;
+}
+interface CasImportResult {
+  funds_imported: number; transactions_imported: number; transactions_skipped: number;
+  instruments_auto_created: number; fund_results: CasImportFundResult[];
+}
+
 // ─── Source config ────────────────────────────────────────────────────────────
 
 interface ImportSourceMeta { value: ImportSource; label: string; description: string; }
@@ -208,6 +234,15 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
   }
   const [fixableRows, setFixableRows] = useState<FixableRow[]>([]);
 
+  // CAMS CAS state
+  const [casPreview, setCasPreview]           = useState<CasPreview | null>(null);
+  // portfolio selection per PAN: { "ABCDE1234F": "2", ... }
+  const [casPortfolioByPan, setCasPortfolioByPan] = useState<Record<string, string>>({});
+  const [casCreatingForPan, setCasCreatingForPan] = useState<string | null>(null);
+  const [casNewPortfolioName, setCasNewPortfolioName] = useState("");
+  const [casPortfolioError, setCasPortfolioError]     = useState("");
+  const [casImportResult, setCasImportResult] = useState<CasImportResult | null>(null);
+
   // Import result
   interface SkippedDetail { trade_date: string; security_name: string; txn_type: string; quantity: number; price: number; reason: string; }
   const [importResult, setImportResult] = useState<{ imported: number; skipped: number; unmatched?: string[]; autoCreated?: string[]; skippedDetails?: SkippedDetail[] } | null>(null);
@@ -228,6 +263,8 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
     setAccountMode("create"); setSelectedAcctId(""); setResolvedAcct(null);
     setNewAcct({ name: "", portfolioId: "", accountType: "EQUITY", broker: "", accountNo: "" });
     setAcctError(""); setSavingAcct(false);
+    setCasPreview(null); setCasPortfolioByPan({}); setCasCreatingForPan(null);
+    setCasNewPortfolioName(""); setCasPortfolioError(""); setCasImportResult(null);
     setImportResult(null); setImportError("");
   };
 
@@ -250,6 +287,22 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
     setParsing(true);
     setParseError("");
     try {
+      // ── CAMS CAS — single file, dedicated flow ────────────────────────────
+      if (source === "CAMS_CAS") {
+        const result = await invoke<CasPreview>("parse_cams_cas_pdf", { filePath: filePaths[0] });
+        setCasPreview(result);
+        // Pre-assign portfolio when only one exists
+        if (portfolios.length === 1) {
+          const pid = portfolios[0].portfolio_id.toString();
+          const byPan: Record<string, string> = {};
+          const pans = [...new Set(result.funds.map(f => f.pan || "__unknown__"))];
+          pans.forEach(pan => { byPan[pan] = pid; });
+          setCasPortfolioByPan(byPan);
+        }
+        setStep("preview");
+        return;
+      }
+
       // Parse each file and merge results
       let result: AnyParsed;
       if (source === "ANGELONE") {
@@ -444,7 +497,45 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
     }
   };
 
-  // ── Create portfolio inline ───────────────────────────────────────────────
+  // ── CAMS: create portfolio for a specific PAN group ──────────────────────
+  const handleCasCreatePortfolio = async () => {
+    const name = casNewPortfolioName.trim();
+    if (!name || !casCreatingForPan) return;
+    try {
+      const created = await invoke<Portfolio>("create_portfolio", { input: { name } });
+      setPortfolios(ps => [...ps, created]);
+      const pid = created.portfolio_id.toString();
+      setCasPortfolioByPan(prev => ({ ...prev, [casCreatingForPan]: pid }));
+      setCasCreatingForPan(null);
+      setCasNewPortfolioName("");
+    } catch (e: any) {
+      setCasPortfolioError(typeof e === "string" ? e : e?.message ?? "Failed");
+    }
+  };
+
+  // ── CAMS: import ──────────────────────────────────────────────────────────
+  const handleCasImport = async () => {
+    if (!casPreview) return;
+    const unassigned = casPreview.funds.some(f => !casPortfolioByPan[f.pan || "__unknown__"]);
+    if (unassigned) { setCasPortfolioError("Assign a portfolio to every investor"); return; }
+    setCasPortfolioError("");
+    setStep("importing");
+    setImportError("");
+    try {
+      const assignments: CasFundAssignment[] = casPreview.funds.map(fund => ({
+        portfolio_id: parseInt(casPortfolioByPan[fund.pan || "__unknown__"]),
+        fund,
+      }));
+      const result = await invoke<CasImportResult>("import_cams_cas", { input: { assignments } });
+      setCasImportResult(result);
+      setStep("done");
+    } catch (e: any) {
+      setImportError(typeof e === "string" ? e : e?.message ?? "Import failed");
+      setStep("preview");
+    }
+  };
+
+  // ── Create portfolio inline (equity sources) ──────────────────────────────
   const handleCreatePortfolio = async () => {
     const name = newPortfolioName.trim();
     if (!name) return;
@@ -461,6 +552,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
 
   // ── Step 3: import ────────────────────────────────────────────────────────
   const handleImport = async () => {
+    if (source === "CAMS_CAS") { await handleCasImport(); return; }
     if (!resolvedAcct || !parsed) return;
     setStep("importing");
     setImportError("");
@@ -628,7 +720,9 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
             {step === "pick"    && "Select the source and upload your statement file."}
             {step === "account" && "Confirm or create the account for this statement."}
             {step === "fix"     && "Some rows could not be parsed. Correct them before continuing."}
-            {step === "preview" && `${filePaths.length > 1 ? `${filePaths.length} files · ` : ""}${totalRows} transactions found. Review and confirm.`}
+            {step === "preview" && (source === "CAMS_CAS" && casPreview
+              ? `${casPreview.funds.length} fund${casPreview.funds.length !== 1 ? "s" : ""} · ${casPreview.total_transactions} transactions · ${casPreview.period_from} → ${casPreview.period_to}`
+              : `${filePaths.length > 1 ? `${filePaths.length} files · ` : ""}${totalRows} transactions found. Review and confirm.`)}
             {step === "done"    && "Transactions have been added."}
           </DialogDescription>
         </DialogHeader>
@@ -902,8 +996,94 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
           </div>
         )}
 
-        {/* ── Step: preview ── */}
-        {step === "preview" && parsed && (
+        {/* ── Step: preview (CAMS CAS) ── */}
+        {step === "preview" && source === "CAMS_CAS" && casPreview && (() => {
+          // Group funds by PAN (each PAN = one investor)
+          const pans = [...new Set(casPreview.funds.map(f => f.pan || "__unknown__"))];
+          return (
+            <div className="space-y-4 py-1">
+              {pans.map(pan => {
+                const panFunds = casPreview.funds.filter(f => (f.pan || "__unknown__") === pan);
+                const assignedPid = casPortfolioByPan[pan] ?? "";
+                return (
+                  <div key={pan} className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                        {pan === "__unknown__" ? "Unknown investor" : `PAN: ${pan}`}
+                        <span className="ml-2 normal-case font-normal">
+                          · {panFunds.length} fund{panFunds.length !== 1 ? "s" : ""}
+                          · {panFunds.reduce((s, f) => s + f.transactions.length, 0)} txns
+                        </span>
+                      </div>
+                      {casCreatingForPan === pan ? (
+                        <div className="flex gap-1.5 shrink-0">
+                          <Input
+                            autoFocus
+                            className="h-7 text-xs w-36"
+                            placeholder="Portfolio name"
+                            value={casNewPortfolioName}
+                            onChange={e => setCasNewPortfolioName(e.target.value)}
+                            onKeyDown={async e => {
+                              if (e.key === "Enter") await handleCasCreatePortfolio();
+                              if (e.key === "Escape") { setCasCreatingForPan(null); setCasNewPortfolioName(""); }
+                            }}
+                          />
+                          <Button size="xs" onClick={handleCasCreatePortfolio} disabled={!casNewPortfolioName.trim()}>Add</Button>
+                          <Button size="xs" variant="outline" onClick={() => { setCasCreatingForPan(null); setCasNewPortfolioName(""); }}>✕</Button>
+                        </div>
+                      ) : (
+                        <Select value={assignedPid} onValueChange={v => {
+                          if (v === "__new__") { setCasCreatingForPan(pan); setCasNewPortfolioName(""); return; }
+                          setCasPortfolioByPan(prev => ({ ...prev, [pan]: v ?? "" }));
+                        }}>
+                          <SelectTrigger className="h-7 text-xs w-40 shrink-0">
+                            <SelectValue placeholder="Assign portfolio" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {portfolios.map(p => (
+                              <SelectItem key={p.portfolio_id} value={p.portfolio_id.toString()}>{p.name}</SelectItem>
+                            ))}
+                            <SelectItem value="__new__" className="text-primary font-medium">+ Create new</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      {panFunds.map((fund, i) => (
+                        <div key={i} className="border rounded-md px-3 py-2 bg-muted/20 text-sm flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-medium truncate">{fund.scheme || fund.isin}</div>
+                            <div className="text-xs text-muted-foreground mt-0.5 flex gap-2 flex-wrap">
+                              <span>{fund.isin}</span>
+                              {fund.folio && <span>· Folio {fund.folio}</span>}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 text-xs text-muted-foreground">
+                            <div className="font-medium text-foreground">{fund.transactions.length} txns</div>
+                            {fund.closing_balance > 0 && <div>{fund.closing_balance.toFixed(3)} units</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {casPortfolioError && (
+                <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
+                  {casPortfolioError}
+                </div>
+              )}
+              {importError && (
+                <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
+                  {importError}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* ── Step: preview (equity/MF sources) ── */}
+        {step === "preview" && source !== "CAMS_CAS" && parsed && (
           <div className="space-y-3 py-1">
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span>Account: <span className="font-medium text-foreground">{resolvedAcct?.name}</span></span>
@@ -939,8 +1119,43 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
           <div className="py-6 text-center text-sm text-muted-foreground">Importing transactions…</div>
         )}
 
-        {/* ── Step: done ── */}
-        {step === "done" && importResult && (
+        {/* ── Step: done (CAMS CAS) ── */}
+        {step === "done" && source === "CAMS_CAS" && casImportResult && (
+          <div className="space-y-3 py-2">
+            <div className="text-sm font-medium text-green-700 dark:text-green-400">
+              {casImportResult.transactions_imported} transaction{casImportResult.transactions_imported !== 1 ? "s" : ""} imported across {casImportResult.funds_imported} fund{casImportResult.funds_imported !== 1 ? "s" : ""}.
+            </div>
+            {casImportResult.instruments_auto_created > 0 && (
+              <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md px-3 py-2">
+                {casImportResult.instruments_auto_created} placeholder instrument{casImportResult.instruments_auto_created !== 1 ? "s" : ""} created — names will be enriched when prices sync.
+              </div>
+            )}
+            {casImportResult.transactions_skipped > 0 && (
+              <div className="text-xs text-muted-foreground">
+                {casImportResult.transactions_skipped} duplicate or zero-value transactions skipped.
+              </div>
+            )}
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {casImportResult.fund_results.map((f, i) => (
+                <div key={i} className="flex items-center justify-between text-xs py-1 border-b border-border/40 last:border-0">
+                  <div className="min-w-0">
+                    <span className="font-medium truncate block">{f.scheme || f.isin}</span>
+                    {f.folio && <span className="text-muted-foreground">Folio {f.folio}</span>}
+                  </div>
+                  <div className="shrink-0 ml-4 text-right">
+                    <span className="text-green-700 dark:text-green-400">{f.transactions_imported} imported</span>
+                    {f.transactions_skipped > 0 && (
+                      <span className="text-muted-foreground ml-2">{f.transactions_skipped} skipped</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Step: done (equity/MF sources) ── */}
+        {step === "done" && source !== "CAMS_CAS" && importResult && (
           <div className="space-y-3 py-2">
             <div className="text-sm font-medium text-green-700 dark:text-green-400">
               {importResult.imported} transaction{importResult.imported !== 1 ? "s" : ""} imported successfully.
@@ -1016,7 +1231,14 @@ export function ImportDialog({ open: isOpen, onOpenChange, accounts, onImported 
             </>
           )}
 
-          {step === "preview" && (
+          {step === "preview" && source === "CAMS_CAS" && (
+            <>
+              <Button variant="outline" onClick={() => setStep("pick")}>Back</Button>
+              <Button onClick={handleImport}>Import {casPreview?.total_transactions} transactions</Button>
+            </>
+          )}
+
+          {step === "preview" && source !== "CAMS_CAS" && (
             <>
               <Button variant="outline" onClick={() => setStep("account")}>Back</Button>
               <Button onClick={handleImport}>Import {totalRows} transactions</Button>

@@ -16,10 +16,18 @@ interface AppLayoutProps {
   onLock: () => void;
 }
 
-function PageContent({ page }: { page: Page }) {
+function PageContent({
+  page,
+  instrumentId,
+  onNavigate,
+}: {
+  page: Page;
+  instrumentId: number | undefined;
+  onNavigate: (page: Page, instrumentId?: number) => void;
+}) {
   switch (page) {
-    case "dashboard":        return <DashboardPage />;
-    case "holdings":         return <HoldingsPage />;
+    case "dashboard":        return <DashboardPage onNavigate={onNavigate} />;
+    case "holdings":         return <HoldingsPage initialInstrumentId={instrumentId} />;
     case "transactions":     return <TransactionsPage />;
     case "capital-gains":    return <CapitalGainsPage />;
     case "income":           return <IncomePage />;
@@ -30,17 +38,23 @@ function PageContent({ page }: { page: Page }) {
 }
 
 export function AppLayout({ onLock }: AppLayoutProps) {
-  const [currentPage, setCurrentPage] = useState<Page>("dashboard");
+  const [currentPage, setCurrentPage]       = useState<Page>("dashboard");
+  const [navInstrumentId, setNavInstrumentId] = useState<number | undefined>();
+
+  const navigate = (page: Page, instrumentId?: number) => {
+    setCurrentPage(page);
+    setNavInstrumentId(instrumentId);
+  };
 
   return (
     <div className="flex flex-col h-screen w-full overflow-hidden bg-background">
       <AppNavbar
         currentPage={currentPage}
-        onNavigate={setCurrentPage}
+        onNavigate={(page) => navigate(page)}
         onLock={onLock}
       />
       <main className="flex-1 overflow-y-auto p-6">
-        <PageContent page={currentPage} />
+        <PageContent page={currentPage} instrumentId={navInstrumentId} onNavigate={navigate} />
       </main>
     </div>
   );
