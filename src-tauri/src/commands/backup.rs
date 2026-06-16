@@ -1,6 +1,6 @@
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
-use crate::auth::{crypto, state as auth_state};
+use crate::auth::crypto;
 use crate::db;
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -9,7 +9,6 @@ use aes_gcm::{
 use rand::{rngs::OsRng, RngCore};
 use zeroize::Zeroize;
 use std::io::{Write as _};
-use std::path::PathBuf;
 
 // .ptdata file magic + version
 const MAGIC: &[u8; 4] = b"PTDT";

@@ -27,38 +27,68 @@ interface OnboardingWizardProps {
   onComplete: () => void;
 }
 
-type Step = "portfolio" | "accounts" | "done";
+type Step = "person" | "portfolio" | "accounts" | "done";
+
+const STEPS: Step[] = ["person", "portfolio", "accounts", "done"];
 
 let draftId = 0;
 
 export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
-  const [step, setStep] = useState<Step>("portfolio");
+  const [step, setStep] = useState<Step>("person");
+
+  // Person step state
+  const [personName, setPersonName]   = useState("");
+  const [personPan,  setPersonPan]    = useState("");
+  const [personId,   setPersonId]     = useState<number | null>(null);
+
+  // Portfolio step state
   const [portfolioName, setPortfolioName] = useState("");
-  const [portfolioId, setPortfolioId] = useState<number | null>(null);
+  const [portfolioId,   setPortfolioId]   = useState<number | null>(null);
+
+  // Account step state
   const [accounts, setAccounts] = useState<AccountDraft[]>([newAccountDraft()]);
+
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [error,  setError]  = useState("");
 
   function newAccountDraft(): AccountDraft {
     return { id: ++draftId, name: "", account_type: "", broker: "", account_no: "" };
   }
 
   const addAccount = () => setAccounts((a) => [...a, newAccountDraft()]);
-
-  const removeAccount = (id: number) =>
-    setAccounts((a) => a.filter((x) => x.id !== id));
-
+  const removeAccount = (id: number) => setAccounts((a) => a.filter((x) => x.id !== id));
   const updateAccount = (id: number, patch: Partial<AccountDraft>) =>
     setAccounts((a) => a.map((x) => (x.id === id ? { ...x, ...patch } : x)));
 
-  // Step 1: create portfolio
+  // Step 1: create person
+  const handleCreatePerson = async () => {
+    const name = personName.trim();
+    if (!name) { setError("Enter your name"); return; }
+    setSaving(true);
+    setError("");
+    try {
+      const p = await invoke<{ person_id: number }>("create_person", {
+        input: { name, pan: personPan.trim() || null },
+      });
+      setPersonId(p.person_id);
+      setStep("portfolio");
+    } catch (e: any) {
+      setError(e.toString());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Step 2: create portfolio (linked to person)
   const handleCreatePortfolio = async () => {
     const name = portfolioName.trim();
     if (!name) { setError("Enter a portfolio name"); return; }
     setSaving(true);
     setError("");
     try {
-      const p = await invoke<{ portfolio_id: number }>("create_portfolio", { input: { name } });
+      const p = await invoke<{ portfolio_id: number }>("create_portfolio", {
+        input: { name, person_id: personId },
+      });
       setPortfolioId(p.portfolio_id);
       setStep("accounts");
     } catch (e: any) {
@@ -68,7 +98,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     }
   };
 
-  // Step 2: create accounts (optional — skip if none filled in)
+  // Step 3: create accounts (optional)
   const handleSaveAccounts = async () => {
     const valid = accounts.filter((a) => a.name.trim() && a.account_type);
     if (valid.length === 0) { setStep("done"); return; }
@@ -96,36 +126,83 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     }
   };
 
+  const stepIndex = STEPS.indexOf(step);
+
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
-      {/* Progress indicator */}
       <div className="w-full max-w-xl space-y-6">
+
+        {/* Progress indicator */}
         <div className="flex items-center gap-2 justify-center">
-          {(["portfolio", "accounts", "done"] as Step[]).map((s, i) => (
+          {STEPS.map((s, i) => (
             <div key={s} className="flex items-center gap-2">
               <div className={cn(
                 "size-7 rounded-full flex items-center justify-center text-xs font-semibold border-2 transition-colors",
                 step === s
                   ? "bg-primary text-primary-foreground border-primary"
-                  : ["portfolio", "accounts", "done"].indexOf(step) > i
+                  : stepIndex > i
                     ? "bg-primary/20 text-primary border-primary/40"
                     : "bg-muted text-muted-foreground border-border"
               )}>
                 {i + 1}
               </div>
-              {i < 2 && <div className="w-8 h-px bg-border" />}
+              {i < STEPS.length - 1 && <div className="w-8 h-px bg-border" />}
             </div>
           ))}
         </div>
 
-        {/* Step 1 — Portfolio name */}
+        {/* Step 1 — Person */}
+        {step === "person" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Who is this for?</CardTitle>
+              <CardDescription>
+                Create a person to hold portfolios. This is typically you, but you can add
+                family members later (e.g. "Spouse", "Father").
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Name</Label>
+                <Input
+                  placeholder='e.g. "Rahul Sharma"'
+                  value={personName}
+                  onChange={(e) => setPersonName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCreatePerson()}
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>
+                  PAN <span className="text-muted-foreground text-xs">(optional — used to unlock password-protected PDFs)</span>
+                </Label>
+                <Input
+                  placeholder="e.g. ABCDE1234F"
+                  value={personPan}
+                  onChange={(e) => setPersonPan(e.target.value.toUpperCase())}
+                  className="uppercase tracking-widest"
+                  maxLength={10}
+                />
+              </div>
+              {error && <p className="text-destructive text-sm">{error}</p>}
+              <Button
+                className="w-full"
+                onClick={handleCreatePerson}
+                disabled={!personName.trim() || saving}
+              >
+                {saving ? "Creating…" : "Continue"}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Step 2 — Portfolio */}
         {step === "portfolio" && (
           <Card>
             <CardHeader>
               <CardTitle>Create your first portfolio</CardTitle>
               <CardDescription>
-                A portfolio groups all your accounts together.
-                You can create more portfolios later (e.g. "Spouse", "Kids").
+                A portfolio groups all your accounts. You can add more portfolios later.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -140,25 +217,34 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 />
               </div>
               {error && <p className="text-destructive text-sm">{error}</p>}
-              <Button
-                className="w-full"
-                onClick={handleCreatePortfolio}
-                disabled={!portfolioName.trim() || saving}
-              >
-                {saving ? "Creating…" : "Continue"}
-              </Button>
+              <div className="flex gap-3">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => { setStep("person"); setError(""); }}
+                >
+                  Back
+                </Button>
+                <Button
+                  className="flex-1"
+                  onClick={handleCreatePortfolio}
+                  disabled={!portfolioName.trim() || saving}
+                >
+                  {saving ? "Creating…" : "Continue"}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         )}
 
-        {/* Step 2 — Accounts */}
+        {/* Step 3 — Accounts */}
         {step === "accounts" && (
           <Card>
             <CardHeader>
               <CardTitle>Add your accounts</CardTitle>
               <CardDescription>
                 Optionally add accounts now — demat, MF folios, FDs, etc.
-                You can also skip and add them later from Settings.
+                You can skip and add them later from Settings.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -201,7 +287,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
           </Card>
         )}
 
-        {/* Step 3 — Done */}
+        {/* Step 4 — Done */}
         {step === "done" && (
           <Card>
             <CardHeader className="text-center">
@@ -210,7 +296,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
               </div>
               <CardTitle>You're all set!</CardTitle>
               <CardDescription>
-                Your portfolio has been created.
+                Your person and portfolio have been created.
                 Next, add accounts from Settings, then import your broker or CAMS statements.
               </CardDescription>
             </CardHeader>
@@ -264,7 +350,7 @@ function AccountRow({ account, index, onUpdate, onRemove }: AccountRowProps) {
         {/* Account type */}
         <div className="space-y-1">
           <Label className="text-xs">Type</Label>
-          <Select value={account.account_type} onValueChange={(v) => onUpdate({ account_type: v, broker: "" })}>
+          <Select value={account.account_type ?? ""} onValueChange={(v) => onUpdate({ account_type: v ?? "", broker: "" })}>
             <SelectTrigger>
               <SelectValue placeholder="Select type" />
             </SelectTrigger>
@@ -285,7 +371,7 @@ function AccountRow({ account, index, onUpdate, onRemove }: AccountRowProps) {
         {selectedType?.brokerRequired && (
           <div className="space-y-1">
             <Label className="text-xs">Broker</Label>
-            <Select value={account.broker} onValueChange={(v) => onUpdate({ broker: v })}>
+            <Select value={account.broker ?? ""} onValueChange={(v) => onUpdate({ broker: v ?? "" })}>
               <SelectTrigger>
                 <SelectValue placeholder="Select broker" />
               </SelectTrigger>

@@ -1,11 +1,10 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  useReactTable, getCoreRowModel, getSortedRowModel,
-  getFilteredRowModel, flexRender,
-  type ColumnDef, type SortingState,
+  useReactTable, getCoreRowModel, flexRender,
+  type ColumnDef,
 } from "@tanstack/react-table";
-import { Plus, Upload, Trash2, ArrowUpDown, ArrowUp, ArrowDown, Pencil, AlertTriangle, CheckCircle2, X, FileText, ChevronLeft } from "lucide-react";
+import { Plus, Upload, Trash2, ArrowUpDown, ArrowUp, ArrowDown, Pencil, AlertTriangle, CheckCircle2, X, FileText, ChevronLeft, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -77,24 +76,47 @@ interface Portfolio { portfolio_id: number; name: string; }
 interface Account { account_id: number; portfolio_id: number; name: string; account_type: string; broker?: string; }
 
 type FlagFilter = "all" | "flagged" | "clean";
+type SortDir = "asc" | "desc";
+
+const SORTABLE_COLS = ["trade_date", "instrument_name", "quantity", "price_paise", "total_value_paise"] as const;
+type SortCol = typeof SORTABLE_COLS[number];
 
 export function TransactionsPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [accounts, setAccounts]         = useState<Account[]>([]);
   const [portfolios, setPortfolios]     = useState<Portfolio[]>([]);
-  const [globalFilter, setGlobalFilter] = useState("");
-  const [sorting, setSorting] = useState<SortingState>([{ id: "trade_date", desc: true }]);
+  const [loading, setLoading] = useState(true);
+  const [reEvaluating, setReEvaluating] = useState(false);
+  const [batchDetail, setBatchDetail]   = useState<ImportBatch | null>(null);
+  const [batchLoading, setBatchLoading] = useState(false);
+
   const [showAdd, setShowAdd]       = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
   const [editTarget, setEditTarget]     = useState<Transaction | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [batchDetail, setBatchDetail]   = useState<ImportBatch | null>(null);
-  const [batchLoading, setBatchLoading] = useState(false);
 
+  // Filters
   const [filterPortfolio, setFilterPortfolio] = useState<string>("all");
   const [filterAccount, setFilterAccount]     = useState<string>("all");
   const [flagFilter, setFlagFilter]           = useState<FlagFilter>("all");
+
+  // Pagination
+  const [page, setPage]           = useState(1);
+  const [pageSize, setPageSize]   = useState(100);
+  const [totalCount, setTotalCount] = useState(0);
+  const [flaggedTotal, setFlaggedTotal] = useState(0);
+
+  // Sorting
+  const [sortCol, setSortCol] = useState<SortCol>("trade_date");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  // Search — raw input debounced to avoid DB hit on every keystroke
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch]           = useState("");
+
+  // Reload trigger — increment to force a reload without changing other state
+  const [loadTick, setLoadTick] = useState(0);
+  const reload = useCallback(() => setLoadTick(t => t + 1), []);
 
   const visibleAccounts = useMemo(() =>
     filterPortfolio === "all"
@@ -109,44 +131,81 @@ export function TransactionsPage() {
     return undefined;
   }, [filterAccount, filterPortfolio, visibleAccounts]);
 
-  const load = async (ids?: number[]) => {
-    setLoading(true);
-    try {
-      const txns = await invoke<Transaction[]>("get_transactions", {
-        filter: {
-          ...(ids ? { account_ids: ids } : {}),
-          ...(flagFilter !== "all" ? { flag_filter: flagFilter } : {}),
-        },
-      });
-      setTransactions(txns);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Debounce search input
+  useEffect(() => {
+    const t = setTimeout(() => { setSearch(searchInput); setPage(1); }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
+  // Main data load
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+
+    const filter = {
+      ...(activeAccountIds ? { account_ids: activeAccountIds } : {}),
+      ...(flagFilter !== "all" ? { flag_filter: flagFilter } : {}),
+      ...(search ? { search } : {}),
+      sort_col: sortCol,
+      sort_dir: sortDir,
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    };
+
+    Promise.all([
+      invoke<Transaction[]>("get_transactions", { filter }),
+      invoke<number>("get_transactions_count", { filter }),
+      invoke<number>("get_flagged_count", { accountIds: activeAccountIds ?? null }),
+    ]).then(([txns, count, flagged]) => {
+      if (cancelled) return;
+      setTransactions(txns);
+      setTotalCount(count);
+      setFlaggedTotal(flagged);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [activeAccountIds, flagFilter, search, sortCol, sortDir, page, pageSize, loadTick]);
+
+  // Initial meta load
   useEffect(() => {
     Promise.all([
       invoke<Portfolio[]>("get_portfolios"),
       invoke<Account[]>("get_accounts", { portfolioId: null }),
-    ]).then(([ps, as_]) => {
-      setPortfolios(ps);
-      setAccounts(as_);
-    });
-    load();
+    ]).then(([ps, as_]) => { setPortfolios(ps); setAccounts(as_); });
   }, []);
 
-  useEffect(() => { load(activeAccountIds); }, [filterPortfolio, filterAccount, flagFilter]);
+  const handleSort = useCallback((col: SortCol) => {
+    if (col === sortCol) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortCol(col);
+      setSortDir("desc");
+    }
+    setPage(1);
+  }, [sortCol]);
+
+  const handleReEvaluate = async () => {
+    setReEvaluating(true);
+    try {
+      await invoke("re_evaluate_flags", { accountId: null });
+      reload();
+    } finally {
+      setReEvaluating(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
     await invoke("delete_transaction", { txnId: deleteTarget.txn_id });
     setDeleteTarget(null);
-    await load(activeAccountIds);
+    reload();
   };
 
   const handleDismissFlag = async (txn: Transaction) => {
     await invoke("dismiss_transaction_flag", { txnId: txn.txn_id });
-    await load(activeAccountIds);
+    reload();
   };
 
   const openBatch = async (batchId: number) => {
@@ -160,10 +219,7 @@ export function TransactionsPage() {
     }
   };
 
-  const flaggedCount = useMemo(
-    () => transactions.filter(t => t.flag && !t.flag_dismissed).length,
-    [transactions]
-  );
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   const columns = useMemo<ColumnDef<Transaction>[]>(() => [
     {
@@ -197,8 +253,7 @@ export function TransactionsPage() {
     },
     {
       id: "trade_date",
-      accessorKey: "trade_date",
-      header: ({ column }) => <SortHeader column={column} label="Date" />,
+      header: () => <SortHeader colId="trade_date" label="Date" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
       cell: ({ row }) => (
         <span className={cn("text-sm tabular-nums", row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
           {formatDate(row.original.trade_date)}
@@ -208,8 +263,7 @@ export function TransactionsPage() {
     },
     {
       id: "instrument_name",
-      accessorKey: "instrument_name",
-      header: ({ column }) => <SortHeader column={column} label="Instrument" />,
+      header: () => <SortHeader colId="instrument_name" label="Instrument" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
       cell: ({ row }) => (
         <div className={cn(row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
           <div className="text-sm font-medium truncate max-w-[200px]">{row.original.instrument_name}</div>
@@ -219,7 +273,6 @@ export function TransactionsPage() {
     },
     {
       id: "txn_type",
-      accessorKey: "txn_type",
       header: "Type",
       cell: ({ row }) => (
         <div className={cn("flex flex-col gap-0.5", row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
@@ -235,7 +288,6 @@ export function TransactionsPage() {
     },
     {
       id: "account_name",
-      accessorKey: "account_name",
       header: "Account",
       cell: ({ row }) => (
         <span className={cn("text-sm text-muted-foreground", row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
@@ -245,8 +297,7 @@ export function TransactionsPage() {
     },
     {
       id: "quantity",
-      accessorKey: "quantity",
-      header: ({ column }) => <SortHeader column={column} label="Qty" right />,
+      header: () => <SortHeader colId="quantity" label="Qty" right sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
       cell: ({ row }) => (
         <span className={cn("text-sm tabular-nums text-right block", row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
           {formatQty(row.original.quantity)}
@@ -256,8 +307,7 @@ export function TransactionsPage() {
     },
     {
       id: "price_paise",
-      accessorKey: "price_paise",
-      header: ({ column }) => <SortHeader column={column} label="Price" right />,
+      header: () => <SortHeader colId="price_paise" label="Price" right sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
       cell: ({ row }) => (
         <span className={cn("text-sm tabular-nums text-right block", row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
           {formatINR(row.original.price_paise)}
@@ -267,8 +317,7 @@ export function TransactionsPage() {
     },
     {
       id: "total_value_paise",
-      accessorKey: "total_value_paise",
-      header: ({ column }) => <SortHeader column={column} label="Total" right />,
+      header: () => <SortHeader colId="total_value_paise" label="Total" right sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
       cell: ({ row }) => {
         const val = row.original.total_value_paise;
         return (
@@ -297,7 +346,7 @@ export function TransactionsPage() {
             {isFlagged && (
               <TooltipProvider>
                 <Tooltip>
-                  <TooltipTrigger >
+                  <TooltipTrigger>
                     <button
                       className="p-1 text-muted-foreground hover:text-green-600 transition-colors"
                       onClick={() => handleDismissFlag(t)}
@@ -326,18 +375,12 @@ export function TransactionsPage() {
       },
       size: 80,
     },
-  ], [transactions]);
+  ], [sortCol, sortDir, handleSort]);
 
   const table = useReactTable({
     data: transactions,
     columns,
-    state: { globalFilter, sorting },
-    onGlobalFilterChange: setGlobalFilter,
-    onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    globalFilterFn: "includesString",
   });
 
   return (
@@ -347,15 +390,19 @@ export function TransactionsPage() {
         <div>
           <h1 className="text-2xl font-semibold">Transactions</h1>
           <p className="text-sm text-muted-foreground">
-            {transactions.length.toLocaleString()} transaction{transactions.length !== 1 ? "s" : ""}
-            {flaggedCount > 0 && (
+            {totalCount.toLocaleString()} transaction{totalCount !== 1 ? "s" : ""}
+            {flaggedTotal > 0 && (
               <span className="ml-2 text-amber-600 font-medium">
-                · {flaggedCount} issue{flaggedCount !== 1 ? "s" : ""}
+                · {flaggedTotal} issue{flaggedTotal !== 1 ? "s" : ""}
               </span>
             )}
           </p>
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" onClick={handleReEvaluate} disabled={reEvaluating}>
+            <RefreshCw className={`size-4 mr-2 ${reEvaluating ? "animate-spin" : ""}`} />
+            {reEvaluating ? "Checking…" : "Re-evaluate"}
+          </Button>
           <Button variant="outline" onClick={() => setShowImport(true)}>
             <Upload className="size-4 mr-2" /> Import
           </Button>
@@ -369,27 +416,27 @@ export function TransactionsPage() {
       <div className="flex gap-2 flex-wrap items-center">
         <Input
           placeholder="Search instrument, account, type…"
-          value={globalFilter}
-          onChange={(e) => setGlobalFilter(e.target.value)}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
           className="w-64 h-8 text-xs"
         />
-        <Select value={filterPortfolio} onValueChange={(v) => { setFilterPortfolio(v ?? "all"); setFilterAccount("all"); }}>
+        <Select value={filterPortfolio} onValueChange={(v) => { setFilterPortfolio(v ?? "all"); setFilterAccount("all"); setPage(1); }}>
           <SelectTrigger className="w-40 h-8 text-xs">
-            <SelectValue placeholder="All Portfolios" />
+            <SelectValue placeholder="ALL PORTFOLIOS" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All Portfolios</SelectItem>
+            <SelectItem value="all">ALL PORTFOLIOS</SelectItem>
             {portfolios.map(p => (
               <SelectItem key={p.portfolio_id} value={p.portfolio_id.toString()}>{p.name}</SelectItem>
             ))}
           </SelectContent>
         </Select>
-        <Select value={filterAccount} onValueChange={(v) => setFilterAccount(v ?? "all")} disabled={visibleAccounts.length === 0}>
+        <Select value={filterAccount} onValueChange={(v) => { setFilterAccount(v ?? "all"); setPage(1); }} disabled={visibleAccounts.length === 0}>
           <SelectTrigger className="w-40 h-8 text-xs">
-            <SelectValue placeholder="All Accounts" />
+            <SelectValue placeholder="ALL ACCOUNTS" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All Accounts</SelectItem>
+            <SelectItem value="all">ALL ACCOUNTS</SelectItem>
             {visibleAccounts.map(a => (
               <SelectItem key={a.account_id} value={a.account_id.toString()}>
                 {a.name}{a.broker ? ` · ${a.broker}` : ""}
@@ -403,7 +450,7 @@ export function TransactionsPage() {
           {(["all", "flagged", "clean"] as FlagFilter[]).map((f) => (
             <button
               key={f}
-              onClick={() => setFlagFilter(f)}
+              onClick={() => { setFlagFilter(f); setPage(1); }}
               className={cn(
                 "px-3 text-xs font-medium border-r last:border-r-0 transition-colors",
                 flagFilter === f
@@ -449,12 +496,24 @@ export function TransactionsPage() {
                 <tr><td colSpan={columns.length} className="px-3 py-8 text-center text-muted-foreground text-sm">Loading…</td></tr>
               ) : table.getRowModel().rows.length === 0 ? (
                 <tr>
-                  <td colSpan={columns.length} className="px-3 py-12 text-center">
-                    <p className="text-muted-foreground text-sm">
-                      {flagFilter === "flagged" ? "No flagged transactions." : "No transactions yet."}
-                    </p>
-                    {flagFilter === "all" && (
-                      <p className="text-xs text-muted-foreground mt-1">Add one manually or import from a broker statement.</p>
+                  <td colSpan={columns.length} className="px-3 py-16 text-center">
+                    {search || flagFilter !== "all" ? (
+                      <p className="text-muted-foreground text-sm">No transactions match your filter.</p>
+                    ) : (
+                      <div className="flex flex-col items-center gap-4">
+                        <div className="flex flex-col items-center gap-1">
+                          <p className="text-base font-medium text-foreground">No transactions yet</p>
+                          <p className="text-sm text-muted-foreground">Import a broker statement or add a transaction manually.</p>
+                        </div>
+                        <div className="flex gap-3">
+                          <Button size="lg" variant="outline" onClick={() => setShowImport(true)}>
+                            <Upload className="size-5 mr-2" /> Import Statement
+                          </Button>
+                          <Button size="lg" onClick={() => setShowAdd(true)}>
+                            <Plus className="size-5 mr-2" /> Add Transaction
+                          </Button>
+                        </div>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -489,13 +548,50 @@ export function TransactionsPage() {
         </div>
       </div>
 
+      {/* Pagination */}
+      <div className="flex items-center justify-between py-1 text-sm shrink-0">
+        <span className="text-xs text-muted-foreground">
+          {totalCount > 0 && (
+            <>
+              Showing {((page - 1) * pageSize + 1).toLocaleString()}–{Math.min(page * pageSize, totalCount).toLocaleString()} of {totalCount.toLocaleString()}
+            </>
+          )}
+        </span>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline" size="sm"
+            disabled={page <= 1 || loading}
+            onClick={() => setPage(p => p - 1)}
+          >
+            ← Prev
+          </Button>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            Page {page} of {totalPages}
+          </span>
+          <Button
+            variant="outline" size="sm"
+            disabled={page >= totalPages || loading}
+            onClick={() => setPage(p => p + 1)}
+          >
+            Next →
+          </Button>
+          <Select value={pageSize.toString()} onValueChange={(v) => { if (v) { setPageSize(parseInt(v)); setPage(1); } }}>
+            <SelectTrigger className="w-20 h-8 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="50">50 / page</SelectItem>
+              <SelectItem value="100">100 / page</SelectItem>
+              <SelectItem value="250">250 / page</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
       {/* Dialogs */}
       <AddTransactionDialog
         open={showAdd}
         onOpenChange={setShowAdd}
-        accounts={accounts}
         onSaved={() => {
-          load(activeAccountIds);
+          reload();
           invoke("resolve_instruments")
             .catch(() => {})
             .then(() => invoke("sync_prices", { force: true }).catch(() => {}));
@@ -505,15 +601,14 @@ export function TransactionsPage() {
         open={!!editTarget}
         onOpenChange={(o) => !o && setEditTarget(null)}
         transaction={editTarget}
-        onSaved={() => load(activeAccountIds)}
+        onSaved={reload}
       />
       <ImportDialog
         open={showImport}
         onOpenChange={setShowImport}
-        accounts={accounts}
         onImported={() => {
           invoke<Account[]>("get_accounts", { portfolioId: null }).then(setAccounts);
-          load(activeAccountIds);
+          invoke("re_evaluate_flags", { accountId: null }).catch(() => {}).then(reload);
           invoke("resolve_instruments")
             .catch(() => {})
             .then(() => invoke("sync_prices", { force: true }).catch(() => {}));
@@ -553,6 +648,29 @@ export function TransactionsPage() {
   );
 }
 
+function SortHeader({ colId, label, right, sortCol, sortDir, onSort }: {
+  colId: SortCol;
+  label: string;
+  right?: boolean;
+  sortCol: SortCol;
+  sortDir: SortDir;
+  onSort: (col: SortCol) => void;
+}) {
+  const active = sortCol === colId;
+  return (
+    <button
+      className={cn("flex items-center gap-1 text-xs font-medium hover:text-foreground transition-colors", right && "ml-auto")}
+      onClick={() => onSort(colId)}
+    >
+      {label}
+      {active
+        ? sortDir === "asc" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />
+        : <ArrowUpDown className="size-3 opacity-40" />
+      }
+    </button>
+  );
+}
+
 function TxnBatchDetailPanel({ batch, onClose }: { batch: ImportBatch; onClose: () => void }) {
   const filePaths: string[] = (() => {
     if (!batch.file_name) return [];
@@ -578,97 +696,72 @@ function TxnBatchDetailPanel({ batch, onClose }: { batch: ImportBatch; onClose: 
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
             {batch.broker && <span>{batch.broker}</span>}
             {batch.batch_trade_date && <span>{formatDate(batch.batch_trade_date)}</span>}
-            <span className="opacity-60">{batch.source_type}</span>
-            <span>Imported {new Date(batch.imported_at + "Z").toLocaleDateString()}</span>
+            <span>Imported {new Date(batch.imported_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</span>
+            <span>{batch.record_count} records</span>
           </div>
-          {filePaths.length > 0 && (
-            <div className="flex flex-col gap-1 items-end shrink-0">
-              {filePaths.map((fp, i) => (
-                <button
-                  key={i}
-                  onClick={() => openPath(fp).catch(() => {})}
-                  className="flex items-center gap-1 text-xs text-primary hover:underline"
-                  title={fp}
-                >
-                  <FileText className="size-3" />
-                  <span className="max-w-[200px] truncate">{fp.split("/").pop()}</span>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
+        {filePaths.length > 0 && (
+          <div className="flex flex-col gap-1 mt-1">
+            {filePaths.map((fp, i) => (
+              <button
+                key={i}
+                className="text-xs text-blue-600 dark:text-blue-400 hover:underline text-left font-mono truncate"
+                onClick={() => openPath(fp).catch(() => {})}
+                title={fp}
+              >
+                {fp.split(/[\\/]/).pop()}
+              </button>
+            ))}
+          </div>
+        )}
       </SheetHeader>
 
       {hasCharges && (
-        <div className="rounded-lg border bg-muted/20 overflow-hidden">
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide px-4 pt-3 pb-2">Charges</p>
-          <table className="w-full text-sm">
-            <tbody className="divide-y">
-              {batch.stt_paise > 0 && <tr><td className="py-2 px-4 text-muted-foreground">STT</td><td className="py-2 px-4 text-right tabular-nums">{formatINR(batch.stt_paise)}</td></tr>}
-              {batch.stamp_charges_paise > 0 && <tr><td className="py-2 px-4 text-muted-foreground">Stamp Duty</td><td className="py-2 px-4 text-right tabular-nums">{formatINR(batch.stamp_charges_paise)}</td></tr>}
-              {batch.gst_paise > 0 && <tr><td className="py-2 px-4 text-muted-foreground">GST</td><td className="py-2 px-4 text-right tabular-nums">{formatINR(batch.gst_paise)}</td></tr>}
-              {batch.trans_charges_paise > 0 && <tr><td className="py-2 px-4 text-muted-foreground">Transaction Charges</td><td className="py-2 px-4 text-right tabular-nums">{formatINR(batch.trans_charges_paise)}</td></tr>}
-              {batch.other_charges_paise > 0 && <tr><td className="py-2 px-4 text-muted-foreground">Other Charges</td><td className="py-2 px-4 text-right tabular-nums">{formatINR(batch.other_charges_paise)}</td></tr>}
-              {batch.total_payable_paise > 0 && <tr className="bg-muted/30 font-medium"><td className="py-2.5 px-4">Net Payable</td><td className="py-2.5 px-4 text-right tabular-nums font-semibold">{formatINR(batch.total_payable_paise)}</td></tr>}
-            </tbody>
-          </table>
+        <div className="rounded-md border p-3 grid grid-cols-3 gap-x-6 gap-y-1 text-xs">
+          {[
+            ["STT", batch.stt_paise],
+            ["Stamp Duty", batch.stamp_charges_paise],
+            ["GST", batch.gst_paise],
+            ["Transaction Charges", batch.trans_charges_paise],
+            ["Other Charges", batch.other_charges_paise],
+            ["Net Payable", batch.total_payable_paise],
+          ].filter(([, v]) => (v as number) !== 0).map(([label, paise]) => (
+            <div key={label as string} className="flex justify-between col-span-1">
+              <span className="text-muted-foreground">{label}</span>
+              <span className="font-mono tabular-nums">{formatINR(paise as number)}</span>
+            </div>
+          ))}
         </div>
       )}
 
-      <div>
-        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-          Trades · {batch.transactions.length}
-        </p>
-        <div className="rounded-lg border overflow-hidden">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b bg-muted/30 text-muted-foreground">
-                <th className="py-2 px-3 text-left font-medium">Security</th>
-                <th className="py-2 px-3 text-left font-medium">Side</th>
-                <th className="py-2 px-3 text-right font-medium">Qty</th>
-                <th className="py-2 px-3 text-right font-medium">Price</th>
-                <th className="py-2 px-3 text-right font-medium">Brokerage</th>
-                <th className="py-2 px-3 text-right font-medium">Net Value</th>
+      <div className="flex-1 overflow-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-muted sticky top-0">
+            <tr>
+              {["Date", "Instrument", "Type", "Qty", "Price", "Total"].map(h => (
+                <th key={h} className="px-2 py-1.5 text-left font-medium text-muted-foreground">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {batch.transactions.map(t => (
+              <tr key={t.txn_id} className="hover:bg-muted/30">
+                <td className="px-2 py-1.5 tabular-nums">{formatDate(t.trade_date)}</td>
+                <td className="px-2 py-1.5 max-w-[160px] truncate">{t.instrument_name}</td>
+                <td className="px-2 py-1.5">{t.txn_type}</td>
+                <td className="px-2 py-1.5 tabular-nums text-right">{formatQty(t.quantity)}</td>
+                <td className="px-2 py-1.5 tabular-nums text-right">{formatINR(t.price_paise)}</td>
+                <td className={cn("px-2 py-1.5 tabular-nums text-right font-medium",
+                  t.total_value_paise > 0 ? "text-green-600 dark:text-green-400"
+                  : t.total_value_paise < 0 ? "text-red-600 dark:text-red-400" : ""
+                )}>
+                  {t.total_value_paise < 0 ? "−" : "+"}₹{Math.abs(t.total_value_paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                </td>
               </tr>
-            </thead>
-            <tbody className="divide-y">
-              {batch.transactions.map((t) => {
-                const isBuy = ["BUY","SIP","OPENING_BALANCE","BONUS","MERGER_IN","SWITCH_IN","TRANSFER_IN"].includes(t.txn_type);
-                const color = TXN_TYPE_COLORS[t.txn_type] ?? "";
-                return (
-                  <tr key={t.txn_id} className="hover:bg-muted/20">
-                    <td className="py-2 px-3 font-medium truncate max-w-[180px]">{t.instrument_name}</td>
-                    <td className={cn("py-2 px-3 font-semibold", color)}>{t.txn_type}</td>
-                    <td className="py-2 px-3 text-right tabular-nums">{formatQty(t.quantity)}</td>
-                    <td className="py-2 px-3 text-right tabular-nums">{formatINR(t.price_paise)}</td>
-                    <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">
-                      {t.brokerage_paise > 0 ? formatINR(t.brokerage_paise) : "—"}
-                    </td>
-                    <td className={cn("py-2 px-3 text-right tabular-nums font-medium", isBuy ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400")}>
-                      {isBuy ? "−" : "+"}{formatINR(Math.abs(t.total_value_paise))}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
     </>
-  );
-}
-
-function SortHeader({ column, label, right }: { column: any; label: string; right?: boolean }) {
-  const sorted = column.getIsSorted();
-  return (
-    <button
-      className={cn("flex items-center gap-1 hover:text-foreground transition-colors", right && "ml-auto")}
-      onClick={() => column.toggleSorting()}
-    >
-      {label}
-      {sorted === "asc" ? <ArrowUp className="size-3" /> :
-       sorted === "desc" ? <ArrowDown className="size-3" /> :
-       <ArrowUpDown className="size-3 opacity-40" />}
-    </button>
   );
 }

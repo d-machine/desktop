@@ -1,4 +1,7 @@
 pub mod account;
+pub mod charges;
+pub mod person;
+pub mod tax;
 pub mod prices;
 pub mod auth;
 pub mod backup;

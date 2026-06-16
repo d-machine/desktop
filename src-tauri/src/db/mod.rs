@@ -39,8 +39,12 @@ pub fn acquire_mut() -> Result<MutexGuard<'static, Option<Connection>>, String> 
         .map_err(|e| e.to_string())
 }
 
-/// Initialize the database. Called once on app startup.
+/// Initialize the database. Called on login and setup.
+/// Safe to call again after lock — the connection stays open, only the master key is wiped.
 pub fn init(db_path: PathBuf) -> Result<()> {
+    if DB.get().is_some() {
+        return Ok(());
+    }
     let conn = open_conn(&db_path)?;
     run_migrations(&conn)?;
     DB.set(Mutex::new(Some(conn)))
@@ -87,11 +91,11 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     )?;
 
     let migrations = migrations::MIGRATIONS;
-    let pending = &migrations[applied as usize..];
-
-    if pending.is_empty() {
+    let applied_usize = applied as usize;
+    if applied_usize >= migrations.len() {
         return Ok(());
     }
+    let pending = &migrations[applied_usize..];
 
     for (i, sql) in pending.iter().enumerate() {
         let version = applied as usize + i + 1;

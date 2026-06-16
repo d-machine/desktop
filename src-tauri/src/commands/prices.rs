@@ -1,6 +1,6 @@
 use crate::db;
+use chrono::{FixedOffset, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ── Public result types ───────────────────────────────────────────────────────
 
@@ -12,40 +12,123 @@ pub struct SyncPricesResult {
 
 #[derive(Serialize)]
 pub struct ResolveResult {
-    pub resolved:  usize,   // instruments successfully matched to server
-    pub merged:    usize,   // duplicate pairs merged into one
-    pub unmatched: usize,   // instruments sent but not found on server
+    pub resolved:   usize,
+    pub unresolved: usize,
 }
 
-// ── Server request / response shapes ─────────────────────────────────────────
+// ── Server request shape ──────────────────────────────────────────────────────
 
+/// One item sent to POST /instruments/resolve for each pending instrument.
 #[derive(Serialize)]
-struct InstrumentRef {
-    client_instrument_id: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    isin:       Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nse_symbol: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bse_code:   Option<String>,
+struct PendingRef {
+    pending_id:         i64,
+    instrument_type:    String,
+    // equity / index / MF
+    isin:               Option<String>,
+    nse_symbol:         Option<String>,
+    bse_code:           Option<String>,
+    amfi_code:          Option<String>,
+    exchange:           Option<String>,
+    // F&O
+    nse_fininstrmid:    Option<i64>,
+    underlying_symbol:  Option<String>,
+    expiry_date:        Option<String>,
+    strike_price_paise: Option<i64>,
+    contract_type:      Option<String>,
+    // MCX
+    mcx_symbol:         Option<String>,
+    unit:               Option<String>,
+}
+
+// ── Server response shapes ────────────────────────────────────────────────────
+
+/// One resolved item returned from GET /instrument-types.
+#[derive(Deserialize)]
+struct InstrumentTypeRow {
+    instrument_type_id: i64,
+    name:               String,
+    asset_class:        String,
+    tax_category:       String,
 }
 
 #[derive(Deserialize)]
-struct ResolvedInstrument {
-    client_instrument_id: i64,
-    isin:       String,
-    nse_symbol: Option<String>,
-    bse_code:   Option<String>,
+struct InstrumentTypesResponse {
+    instrument_types: Vec<InstrumentTypeRow>,
+}
+
+/// One instrument update record returned from GET /instruments/updates.
+#[derive(Deserialize)]
+struct InstrumentUpdate {
+    instrument_id:        i64,
+    name:                 String,
+    instrument_type_id:   i64,
+    instrument_type_name: String,
+    updated_at:           String,
+    isin:                 Option<String>,
+    nse_symbol:           Option<String>,
+    bse_code:             Option<String>,
+    sector:               Option<String>,
+    industry:             Option<String>,
+    index_symbol:         Option<String>,
+    index_exchange:       Option<String>,
+    amfi_code:            Option<String>,
+    mcx_symbol:           Option<String>,
 }
 
 #[derive(Deserialize)]
-struct ResolveResponse {
-    resolved: Vec<ResolvedInstrument>,
+struct InstrumentUpdatesResponse {
+    updates:   Vec<InstrumentUpdate>,
+    synced_at: String,
 }
 
+/// One resolved item returned from POST /instruments/resolve.
+#[derive(Deserialize)]
+struct ResolvedPending {
+    pending_id:               i64,
+    instrument_id:            i64,
+    instrument_type_id:       i64,       // server's canonical type ID — stored directly
+    instrument_type_name:     String,
+    name:                     String,
+    primary_exchange_code:    Option<String>,
+    // equity
+    isin:                     Option<String>,
+    nse_symbol:               Option<String>,
+    nse_equity_fininstrmid:   Option<i64>,
+    bse_code:                 Option<String>,
+    // mutual fund
+    amfi_code:                Option<String>,
+    // index
+    index_symbol:             Option<String>,
+    index_exchange:           Option<String>,
+    // derivatives (F&O)
+    underlying_instrument_id: Option<i64>,
+    underlying_symbol:        Option<String>,
+    fo_expiry_date:           Option<String>,
+    fo_lot_size:              Option<i64>,
+    fo_strike_price_paise:    Option<i64>,
+    fo_instrument_type:       Option<String>,   // 'FUTURES' or 'OPTIONS'
+    fo_option_type:           Option<String>,   // '-', 'CE', 'PE'
+    fo_nse_fininstrmid:       Option<i64>,
+    fo_bse_fininstrmid:       Option<i64>,
+    // MCX
+    mcx_symbol:               Option<String>,
+    mcx_instrument_type:      Option<String>,
+    mcx_expiry_date:          Option<String>,
+    mcx_lot_size:             Option<f64>,
+    mcx_unit:                 Option<String>,
+    mcx_strike_price_paise:   Option<i64>,
+    mcx_option_type:          Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResolvePendingResponse {
+    resolved: Vec<ResolvedPending>,
+}
+
+/// One price record returned from GET /prices/sync keyed by instrument_id.
 #[derive(Deserialize)]
 struct ServerPrice {
-    isin:              String,
+    instrument_id:     i64,
     price_date:        String,
     open_price_paise:  Option<i64>,
     high_price_paise:  Option<i64>,
@@ -59,7 +142,23 @@ struct SyncResponse {
     synced_at: Option<String>,
 }
 
-// ── DB helpers (sync, to avoid lifetime issues in async state machines) ───────
+// ── IST sync window ───────────────────────────────────────────────────────────
+
+/// Returns true if the current IST time falls within an auto-sync window:
+///   06:00–10:30 (pre-market) or 15:30–23:00 (post-close).
+/// force=true bypasses this check entirely.
+fn is_in_sync_window() -> bool {
+    let ist    = FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("valid offset");
+    let now    = Utc::now().with_timezone(&ist).time();
+    let window = |h0: u32, m0: u32, h1: u32, m1: u32| {
+        let start = NaiveTime::from_hms_opt(h0, m0, 0).expect("valid time");
+        let end   = NaiveTime::from_hms_opt(h1, m1, 0).expect("valid time");
+        now >= start && now <= end
+    };
+    window(6, 0, 10, 30) || window(15, 30, 23, 0)
+}
+
+// ── DB helpers ────────────────────────────────────────────────────────────────
 
 fn get_setting(key: &str) -> Option<String> {
     let conn = db::acquire().ok()?;
@@ -70,21 +169,59 @@ fn get_setting(key: &str) -> Option<String> {
     ).ok().filter(|v| !v.is_empty())
 }
 
-fn get_portfolio_instruments() -> Result<Vec<InstrumentRef>, String> {
+fn resolve_server_url() -> String {
+    get_setting("server_url").unwrap_or_else(|| "http://localhost:8000".to_string())
+}
+
+fn save_setting(key: &str, value: &str) -> Result<(), String> {
+    let conn = db::acquire()?;
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at)
+         VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET
+             value      = excluded.value,
+             updated_at = excluded.updated_at",
+        [key, value],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn get_pending_instruments() -> Result<Vec<PendingRef>, String> {
     let conn = db::acquire()?;
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT i.instrument_id, i.isin, ie.nse_symbol, ie.bse_code
-         FROM instruments i
-         JOIN transactions t ON i.instrument_id = t.instrument_id
-         LEFT JOIN instrument_equity ie ON ie.instrument_id = i.instrument_id",
+        "SELECT pending_id,
+                type                                          AS instrument_type,
+                json_extract(metadata, '$.isin')             AS isin,
+                json_extract(metadata, '$.nse_symbol')       AS nse_symbol,
+                json_extract(metadata, '$.bse_code')         AS bse_code,
+                json_extract(metadata, '$.amfi_code')        AS amfi_code,
+                json_extract(metadata, '$.exchange')         AS exchange,
+                json_extract(metadata, '$.underlying_symbol') AS underlying_symbol,
+                json_extract(metadata, '$.expiry_date')      AS expiry_date,
+                json_extract(metadata, '$.strike_price_paise') AS strike_price_paise,
+                json_extract(metadata, '$.option_type')      AS contract_type,
+                json_extract(metadata, '$.mcx_symbol')       AS mcx_symbol,
+                json_extract(metadata, '$.unit')             AS unit
+         FROM pending_instruments
+         ORDER BY pending_id",
     ).map_err(|e| e.to_string())?;
 
     let result = stmt.query_map([], |r| {
-        Ok(InstrumentRef {
-            client_instrument_id: r.get(0)?,
-            isin:       r.get(1)?,
-            nse_symbol: r.get(2)?,
-            bse_code:   r.get(3)?,
+        Ok(PendingRef {
+            pending_id:         r.get(0)?,
+            instrument_type:    r.get(1)?,
+            isin:               r.get(2)?,
+            nse_symbol:         r.get(3)?,
+            bse_code:           r.get(4)?,
+            amfi_code:          r.get(5)?,
+            exchange:           r.get(6)?,
+            nse_fininstrmid:    None,
+            underlying_symbol:  r.get(7)?,
+            expiry_date:        r.get(8)?,
+            strike_price_paise: r.get(9)?,
+            contract_type:      r.get(10)?,
+            mcx_symbol:         r.get(11)?,
+            unit:               r.get(12)?,
         })
     })
     .map_err(|e| e.to_string())?
@@ -93,162 +230,14 @@ fn get_portfolio_instruments() -> Result<Vec<InstrumentRef>, String> {
     result
 }
 
-/// Apply resolved instrument data from the server.
-///
-/// For each resolved ISIN:
-/// - If two client instruments mapped to the same ISIN → merge them:
-///   re-point all transactions to the survivor (the one that already had an ISIN,
-///   or the lower-id one otherwise), copy missing NSE/BSE codes, delete the orphan.
-/// - If only one client instrument mapped to the ISIN → fill in any missing fields.
-///
-/// Instruments that were sent but are not in `resolved` are marked UNMATCHED.
-///
-/// Returns (resolved_count, merged_count, unmatched_count).
-fn apply_resolved(
-    sent: &[InstrumentRef],
-    resolved: &[ResolvedInstrument],
-) -> Result<(usize, usize, usize), String> {
-    let conn = db::acquire()?;
-
-    // Group resolved entries by canonical ISIN → Vec<client_instrument_id>
-    let mut isin_to_ids: HashMap<String, Vec<i64>> = HashMap::new();
-    for r in resolved {
-        isin_to_ids.entry(r.isin.clone()).or_default().push(r.client_instrument_id);
-    }
-
-    // Build lookup: client_instrument_id → ResolvedInstrument
-    let resolved_map: HashMap<i64, &ResolvedInstrument> =
-        resolved.iter().map(|r| (r.client_instrument_id, r)).collect();
-
-    let sent_ids: std::collections::HashSet<i64> =
-        sent.iter().map(|s| s.client_instrument_id).collect();
-
-    let mut resolved_count = 0usize;
-    let mut merged_count   = 0usize;
-
-    for (isin, mut ids) in isin_to_ids {
-        // Prefer the instrument that already has this ISIN as survivor
-        ids.sort_unstable();
-        let survivor_id = {
-            let existing_isin: Option<i64> = conn.query_row(
-                "SELECT instrument_id FROM instruments WHERE isin = ?1",
-                [&isin],
-                |r| r.get(0),
-            ).ok();
-            existing_isin.unwrap_or(ids[0])
-        };
-
-        // survivor_id may be an instrument that already had the ISIN in the DB
-        // but wasn't returned by the server (e.g. it was sent but matched another way).
-        // Fall back to any id in the group that IS in the resolved_map.
-        let effective_id = if resolved_map.contains_key(&survivor_id) {
-            survivor_id
-        } else {
-            match ids.iter().find(|id| resolved_map.contains_key(id)) {
-                Some(&id) => id,
-                None => continue, // nothing to apply
-            }
-        };
-        let r = resolved_map[&effective_id];
-
-        // Update survivor ISIN + status
-        conn.execute(
-            "UPDATE instruments SET isin = ?1, resolution_status = 'RESOLVED'
-             WHERE instrument_id = ?2",
-            rusqlite::params![isin, survivor_id],
-        ).map_err(|e| e.to_string())?;
-
-        // Merge duplicates first, before upserting survivor's equity row.
-        // This is critical: orphan may hold the same bse_code/nse_symbol that the
-        // survivor needs — we must delete (or copy then delete) the orphan's
-        // instrument_equity row before inserting those values for the survivor,
-        // otherwise the UNIQUE index on bse_code fires.
-        for &orphan_id in ids.iter().filter(|&&id| id != survivor_id) {
-            // Re-point all transactions
-            conn.execute(
-                "UPDATE transactions SET instrument_id = ?1
-                 WHERE instrument_id = ?2",
-                rusqlite::params![survivor_id, orphan_id],
-            ).map_err(|e| e.to_string())?;
-
-            // Re-point tax_lots
-            conn.execute(
-                "UPDATE tax_lots SET instrument_id = ?1
-                 WHERE instrument_id = ?2",
-                rusqlite::params![survivor_id, orphan_id],
-            ).ok();
-
-            // Copy missing equity identifiers from orphan to survivor BEFORE
-            // deleting the orphan row (survivor may not have instrument_equity yet)
-            conn.execute(
-                "INSERT INTO instrument_equity (instrument_id, nse_symbol, bse_code)
-                 SELECT ?1,
-                        COALESCE((SELECT nse_symbol FROM instrument_equity WHERE instrument_id = ?1),
-                                 nse_symbol),
-                        COALESCE((SELECT bse_code FROM instrument_equity WHERE instrument_id = ?1),
-                                 bse_code)
-                 FROM instrument_equity WHERE instrument_id = ?2
-                 ON CONFLICT(instrument_id) DO UPDATE SET
-                     nse_symbol = COALESCE(nse_symbol, excluded.nse_symbol),
-                     bse_code   = COALESCE(bse_code,   excluded.bse_code)",
-                rusqlite::params![survivor_id, orphan_id],
-            ).ok();
-
-            // Now safe to delete orphan equity (UNIQUE index freed)
-            conn.execute(
-                "DELETE FROM instrument_equity WHERE instrument_id = ?1",
-                [orphan_id],
-            ).ok();
-            conn.execute(
-                "DELETE FROM latest_prices WHERE instrument_id = ?1",
-                [orphan_id],
-            ).ok();
-            conn.execute(
-                "DELETE FROM instruments WHERE instrument_id = ?1",
-                [orphan_id],
-            ).map_err(|e| e.to_string())?;
-
-            merged_count += 1;
-        }
-
-        // Now that all orphan equity rows are gone, safely upsert survivor equity
-        if r.nse_symbol.is_some() || r.bse_code.is_some() {
-            conn.execute(
-                "INSERT INTO instrument_equity (instrument_id, nse_symbol, bse_code)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(instrument_id) DO UPDATE SET
-                     nse_symbol = COALESCE(nse_symbol, excluded.nse_symbol),
-                     bse_code   = COALESCE(bse_code,   excluded.bse_code)",
-                rusqlite::params![survivor_id, r.nse_symbol, r.bse_code],
-            ).map_err(|e| e.to_string())?;
-        }
-
-        resolved_count += 1;
-    }
-
-    // Mark instruments that were sent but not resolved as UNMATCHED
-    let resolved_ids: std::collections::HashSet<i64> =
-        resolved.iter().map(|r| r.client_instrument_id).collect();
-    let unmatched_count = sent_ids.difference(&resolved_ids).count();
-    for &id in sent_ids.difference(&resolved_ids) {
-        conn.execute(
-            "UPDATE instruments SET resolution_status = 'UNMATCHED'
-             WHERE instrument_id = ?1 AND resolution_status = 'PENDING'",
-            [id],
-        ).map_err(|e| e.to_string())?;
-    }
-
-    Ok((resolved_count, merged_count, unmatched_count))
-}
-
-fn get_portfolio_isins() -> Result<Vec<String>, String> {
+fn get_portfolio_instrument_ids() -> Result<Vec<i64>, String> {
     let conn = db::acquire()?;
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT i.isin
-         FROM instruments i
-         JOIN transactions t ON i.instrument_id = t.instrument_id
-         WHERE i.isin IS NOT NULL",
+        "SELECT DISTINCT instrument_id
+         FROM transactions
+         WHERE instrument_id IS NOT NULL",
     ).map_err(|e| e.to_string())?;
+
     let result = stmt.query_map([], |r| r.get(0))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
@@ -256,17 +245,273 @@ fn get_portfolio_isins() -> Result<Vec<String>, String> {
     result
 }
 
+// ── Instrument types sync ─────────────────────────────────────────────────────
+
+async fn sync_instrument_types(
+    base_url: &str,
+    client: &reqwest::Client,
+) -> Result<usize, String> {
+    let resp = client
+        .get(format!("{}/instruments/types", base_url))
+        .send()
+        .await
+        .map_err(|e| format!("Instrument types fetch failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Instrument types returned {}", resp.status()));
+    }
+
+    let body: InstrumentTypesResponse = resp.json().await
+        .map_err(|e| format!("Failed to parse instrument types: {}", e))?;
+
+    let conn = db::acquire()?;
+    let mut count = 0usize;
+    for t in &body.instrument_types {
+        conn.execute(
+            "INSERT INTO instrument_types (instrument_type_id, name, asset_class, tax_category)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(instrument_type_id) DO UPDATE SET
+                 name         = excluded.name,
+                 asset_class  = excluded.asset_class,
+                 tax_category = excluded.tax_category",
+            rusqlite::params![t.instrument_type_id, t.name, t.asset_class, t.tax_category],
+        ).map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+// ── Instrument metadata delta sync ───────────────────────────────────────────
+
+fn apply_instrument_updates(updates: &[InstrumentUpdate]) -> Result<usize, String> {
+    let conn = db::acquire()?;
+    let mut count = 0usize;
+
+    for u in updates {
+        // Update base instruments row name + type
+        conn.execute(
+            "UPDATE instruments SET name = ?1, instrument_type_id = ?2, updated_at = ?3
+             WHERE instrument_id = ?4",
+            rusqlite::params![u.name, u.instrument_type_id, u.updated_at, u.instrument_id],
+        ).map_err(|e| e.to_string())?;
+
+        // Update extension table fields if present
+        match u.instrument_type_name.as_str() {
+            "EQUITY" => {
+                conn.execute(
+                    "UPDATE instrument_equity SET
+                         isin       = COALESCE(?1, isin),
+                         nse_symbol = COALESCE(?2, nse_symbol),
+                         bse_code   = COALESCE(?3, bse_code),
+                         sector     = COALESCE(?4, sector),
+                         industry   = COALESCE(?5, industry)
+                     WHERE instrument_id = ?6",
+                    rusqlite::params![
+                        u.isin, u.nse_symbol, u.bse_code,
+                        u.sector, u.industry, u.instrument_id,
+                    ],
+                ).map_err(|e| e.to_string())?;
+            }
+            "INDEX" => {
+                conn.execute(
+                    "UPDATE instrument_index SET
+                         symbol   = COALESCE(?1, symbol),
+                         exchange = COALESCE(?2, exchange)
+                     WHERE instrument_id = ?3",
+                    rusqlite::params![u.index_symbol, u.index_exchange, u.instrument_id],
+                ).map_err(|e| e.to_string())?;
+            }
+            "EQUITY_MF" | "DEBT_MF" | "HYBRID_MF" | "ELSS" | "SIF" => {
+                conn.execute(
+                    "UPDATE instrument_mf SET amfi_code = COALESCE(?1, amfi_code)
+                     WHERE instrument_id = ?2",
+                    rusqlite::params![u.amfi_code, u.instrument_id],
+                ).map_err(|e| e.to_string())?;
+            }
+            "COMMODITY_FUTURES" | "COMMODITY_OPTIONS" => {
+                conn.execute(
+                    "UPDATE instrument_mcx SET mcx_symbol = COALESCE(?1, mcx_symbol)
+                     WHERE instrument_id = ?2",
+                    rusqlite::params![u.mcx_symbol, u.instrument_id],
+                ).map_err(|e| e.to_string())?;
+            }
+            _ => {}
+        }
+
+        count += 1;
+    }
+    Ok(count)
+}
+
+async fn fetch_instrument_updates(
+    base_url: &str,
+    client: &reqwest::Client,
+) -> Result<usize, String> {
+    let last_sync = get_setting("last_instrument_sync").unwrap_or_default();
+
+    let ids = get_portfolio_instrument_ids()?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let id_qs = ids.iter()
+        .map(|id| format!("instrument_ids={}", id))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let url = if last_sync.is_empty() {
+        format!("{}/instruments/updates?{}", base_url, id_qs)
+    } else {
+        format!("{}/instruments/updates?{}&since={}", base_url, id_qs, last_sync)
+    };
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Instrument updates fetch failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Instrument updates returned {}", resp.status()));
+    }
+
+    let body: InstrumentUpdatesResponse = resp.json().await
+        .map_err(|e| format!("Failed to parse instrument updates: {}", e))?;
+
+    let count = apply_instrument_updates(&body.updates)?;
+    save_setting("last_instrument_sync", &body.synced_at)?;
+    Ok(count)
+}
+
+// ── Resolve helpers ───────────────────────────────────────────────────────────
+
+/// Apply one batch of server-resolved instruments:
+/// 1. Insert into `instruments` with the server-assigned instrument_id and instrument_type_id.
+/// 2. Insert into the appropriate extension table.
+/// 3. Re-point all transactions from pending_instrument_id → instrument_id.
+/// 4. Delete the staging row.
+fn apply_resolved_pending(resolved: &[ResolvedPending]) -> Result<usize, String> {
+    let conn = db::acquire()?;
+    let mut count = 0usize;
+
+    for r in resolved {
+        // Map exchange code to local exchange_id
+        let exchange_id: Option<i64> = r.primary_exchange_code.as_ref().and_then(|code| {
+            conn.query_row(
+                "SELECT exchange_id FROM exchanges WHERE code = ?1",
+                [code],
+                |row| row.get(0),
+            ).ok()
+        });
+
+        // Insert base instruments row; uses server's canonical IDs (no AUTOINCREMENT)
+        conn.execute(
+            "INSERT OR IGNORE INTO instruments
+                (instrument_id, name, instrument_type_id, primary_exchange_id, source)
+             VALUES (?1, ?2, ?3, ?4, 'SERVER')",
+            rusqlite::params![
+                r.instrument_id, r.name, r.instrument_type_id, exchange_id,
+            ],
+        ).map_err(|e| e.to_string())?;
+
+        // Insert into the matching extension table
+        match r.instrument_type_name.as_str() {
+            "EQUITY" => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO instrument_equity
+                        (instrument_id, isin, nse_symbol, nse_fininstrmid, bse_code)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        r.instrument_id, r.isin, r.nse_symbol,
+                        r.nse_equity_fininstrmid, r.bse_code,
+                    ],
+                ).map_err(|e| e.to_string())?;
+            }
+            "INDEX" => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO instrument_index
+                        (instrument_id, symbol, exchange)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        r.instrument_id, r.index_symbol, r.index_exchange,
+                    ],
+                ).map_err(|e| e.to_string())?;
+            }
+            "EQUITY_MF" | "DEBT_MF" | "HYBRID_MF" | "ELSS" | "SIF" => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO instrument_mf
+                        (instrument_id, amfi_code)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![r.instrument_id, r.amfi_code],
+                ).map_err(|e| e.to_string())?;
+            }
+            "FUTURES" | "OPTIONS" => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO instrument_derivatives
+                        (instrument_id, underlying_instrument_id, underlying_symbol,
+                         expiry_date, lot_size, strike_price_paise,
+                         instrument_type, option_type,
+                         nse_fininstrmid, bse_fininstrmid)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        r.instrument_id,
+                        r.underlying_instrument_id,
+                        r.underlying_symbol,
+                        r.fo_expiry_date,
+                        r.fo_lot_size.unwrap_or(0),
+                        r.fo_strike_price_paise,
+                        r.fo_instrument_type,
+                        r.fo_option_type,
+                        r.fo_nse_fininstrmid,
+                        r.fo_bse_fininstrmid,
+                    ],
+                ).map_err(|e| e.to_string())?;
+            }
+            "COMMODITY_FUTURES" | "COMMODITY_OPTIONS" => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO instrument_mcx
+                        (instrument_id, mcx_symbol, instrument_type, expiry_date,
+                         lot_size, unit, strike_price_paise, option_type)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        r.instrument_id,
+                        r.mcx_symbol,
+                        r.mcx_instrument_type,
+                        r.mcx_expiry_date,
+                        r.mcx_lot_size.unwrap_or(0.0),
+                        r.mcx_unit,
+                        r.mcx_strike_price_paise,
+                        r.mcx_option_type,
+                    ],
+                ).map_err(|e| e.to_string())?;
+            }
+            _ => {}
+        }
+
+        // Re-point transactions: pending_instrument_id → resolved instrument_id
+        conn.execute(
+            "UPDATE transactions
+             SET instrument_id = ?1, pending_instrument_id = NULL
+             WHERE pending_instrument_id = ?2",
+            rusqlite::params![r.instrument_id, r.pending_id],
+        ).map_err(|e| e.to_string())?;
+
+        // Remove from staging table
+        conn.execute(
+            "DELETE FROM pending_instruments WHERE pending_id = ?1",
+            [r.pending_id],
+        ).map_err(|e| e.to_string())?;
+
+        count += 1;
+    }
+
+    Ok(count)
+}
+
 fn write_prices(prices: &[ServerPrice]) -> Result<usize, String> {
     let conn = db::acquire()?;
     let mut count = 0usize;
-    for price in prices {
-        let instrument_id: Option<i64> = conn.query_row(
-            "SELECT instrument_id FROM instruments WHERE isin = ?1",
-            [&price.isin],
-            |r| r.get(0),
-        ).ok();
-        let Some(iid) = instrument_id else { continue; };
-
+    for p in prices {
         conn.execute(
             "INSERT INTO latest_prices
                 (instrument_id, price_date,
@@ -281,12 +526,12 @@ fn write_prices(prices: &[ServerPrice]) -> Result<usize, String> {
                  close_price_paise = excluded.close_price_paise,
                  updated_at        = datetime('now')",
             rusqlite::params![
-                iid,
-                price.price_date,
-                price.open_price_paise,
-                price.high_price_paise,
-                price.low_price_paise,
-                price.close_price_paise,
+                p.instrument_id,
+                p.price_date,
+                p.open_price_paise,
+                p.high_price_paise,
+                p.low_price_paise,
+                p.close_price_paise,
             ],
         ).map_err(|e| e.to_string())?;
         count += 1;
@@ -294,56 +539,37 @@ fn write_prices(prices: &[ServerPrice]) -> Result<usize, String> {
     Ok(count)
 }
 
-fn save_sync_time(synced_at: &str) -> Result<(), String> {
-    let conn = db::acquire()?;
-    conn.execute(
-        "INSERT INTO app_settings (key, value, updated_at)
-         VALUES ('last_price_sync', ?1, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET
-             value = excluded.value,
-             updated_at = excluded.updated_at",
-        [synced_at],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn resolve_server_url() -> String {
-    match get_setting("server_url") {
-        Some(url) if !url.contains("api.portfoliotracker.app") => url,
-        _ => "http://localhost:8000".to_string(),
-    }
-}
-
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-/// Resolve client instruments against the server's instrument catalog.
+/// Resolve all pending instruments against the server's instrument catalog.
 ///
-/// Sends all portfolio instruments (with whatever identifiers they have) to
-/// `POST /instruments/resolve`. The server tries ISIN → NSE symbol → BSE code
-/// lookup and returns canonical records.
-///
-/// The client then:
-/// 1. Back-fills missing ISINs, NSE symbols, and BSE codes.
-/// 2. Merges any duplicate instruments that resolved to the same ISIN
-///    (re-points transactions, deletes the orphan).
-/// 3. Marks unresolved instruments as UNMATCHED so the UI can flag them.
+/// Flow:
+///   1. Sync instrument_types from server (always first — safety net for new types).
+///   2. Send pending_instruments to POST /instruments/resolve.
+///   3. If any returned instrument_type_id is missing locally, re-sync types and retry.
+///   4. Apply resolved instruments to local DB.
 #[tauri::command]
 pub async fn resolve_instruments() -> Result<ResolveResult, String> {
     let base_url = resolve_server_url();
-    let refs     = get_portfolio_instruments()?;
+    let pending  = get_pending_instruments()?;
 
-    if refs.is_empty() {
-        return Ok(ResolveResult { resolved: 0, merged: 0, unmatched: 0 });
+    if pending.is_empty() {
+        return Ok(ResolveResult { resolved: 0, unresolved: 0 });
     }
 
+    let total = pending.len();
+
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Always sync instrument types first
+    sync_instrument_types(&base_url, &client).await?;
+
     let resp = client
         .post(format!("{}/instruments/resolve", base_url))
-        .json(&refs)
+        .json(&pending)
         .send()
         .await
         .map_err(|e| format!("Instrument server unreachable: {}", e))?;
@@ -352,40 +578,65 @@ pub async fn resolve_instruments() -> Result<ResolveResult, String> {
         return Err(format!("Instrument resolve returned {}", resp.status()));
     }
 
-    let body: ResolveResponse = resp.json().await
+    let body: ResolvePendingResponse = resp.json().await
         .map_err(|e| format!("Failed to parse resolve response: {}", e))?;
 
-    let (resolved, merged, unmatched) = apply_resolved(&refs, &body.resolved)?;
-    Ok(ResolveResult { resolved, merged, unmatched })
+    // Safety net: if any returned type_id is not yet local, re-sync types.
+    // conn must be dropped before the await — MutexGuard is not Send.
+    let needs_type_resync = {
+        let conn = db::acquire()?;
+        body.resolved.iter().any(|r| {
+            conn.query_row(
+                "SELECT 1 FROM instrument_types WHERE instrument_type_id = ?1",
+                [r.instrument_type_id],
+                |_| Ok(()),
+            ).is_err()
+        })
+    };
+    if needs_type_resync {
+        sync_instrument_types(&base_url, &client).await?;
+    }
+
+    let resolved = apply_resolved_pending(&body.resolved)?;
+
+    Ok(ResolveResult {
+        resolved,
+        unresolved: total.saturating_sub(resolved),
+    })
 }
 
-/// Fetch latest prices from the price server for all instruments in the
-/// client's portfolio.
+/// Fetch latest prices from the server for all resolved portfolio instruments.
 ///
-/// Sends the list of ISINs held + the last sync timestamp.
-/// Server returns only the instruments whose price changed since that time.
-/// Updates the local `latest_prices` table and stores the new sync timestamp.
+/// Flow:
+///   1. IST window check (bypass with force=true).
+///   2. Fetch prices for all portfolio instrument_ids.
+///   3. Best-effort instrument metadata delta sync.
+///   4. Save last_price_sync + last_instrument_sync timestamps.
 #[tauri::command]
 pub async fn sync_prices(force: Option<bool>) -> Result<SyncPricesResult, String> {
-    let base_url  = resolve_server_url();
-    let isins     = get_portfolio_isins()?;
-    let last_sync = get_setting("last_price_sync").unwrap_or_default();
+    let force_sync = force.unwrap_or(false);
 
-    if isins.is_empty() {
+    if !force_sync && !is_in_sync_window() {
         return Ok(SyncPricesResult { updated: 0, synced_at: String::new() });
     }
 
-    let isin_qs = isins.iter()
-        .map(|i| format!("isins={}", i))
+    let base_url  = resolve_server_url();
+    let ids       = get_portfolio_instrument_ids()?;
+    let last_sync = get_setting("last_price_sync").unwrap_or_default();
+
+    if ids.is_empty() {
+        return Ok(SyncPricesResult { updated: 0, synced_at: String::new() });
+    }
+
+    let id_qs = ids.iter()
+        .map(|id| format!("instrument_ids={}", id))
         .collect::<Vec<_>>()
         .join("&");
 
-    // force=true or no previous sync → full fetch (no since_datetime filter)
-    let skip_delta = force.unwrap_or(false) || last_sync.is_empty();
-    let url = if skip_delta {
-        format!("{}/prices/sync?{}", base_url, isin_qs)
+    let url = if force_sync || last_sync.is_empty() {
+        format!("{}/prices/sync?{}", base_url, id_qs)
     } else {
-        format!("{}/prices/sync?{}&since_datetime={}", base_url, isin_qs, last_sync)
+        format!("{}/prices/sync?{}&since_datetime={}", base_url, id_qs, last_sync)
     };
 
     let client = reqwest::Client::builder()
@@ -393,7 +644,8 @@ pub async fn sync_prices(force: Option<bool>) -> Result<SyncPricesResult, String
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("Price server unreachable: {}", e))?;
@@ -403,13 +655,16 @@ pub async fn sync_prices(force: Option<bool>) -> Result<SyncPricesResult, String
     }
 
     let body: SyncResponse = resp.json().await
-        .map_err(|e| format!("Failed to parse server response: {}", e))?;
+        .map_err(|e| format!("Failed to parse price response: {}", e))?;
 
     let updated   = write_prices(&body.prices)?;
     let synced_at = body.synced_at
-        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string());
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-    save_sync_time(&synced_at)?;
+    save_setting("last_price_sync", &synced_at)?;
+
+    // Best-effort instrument metadata delta sync — don't fail price sync on error
+    let _ = fetch_instrument_updates(&base_url, &client).await;
 
     Ok(SyncPricesResult { updated, synced_at })
 }

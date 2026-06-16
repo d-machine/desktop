@@ -279,7 +279,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
               Capital Gains{currentFY ? ` · FY ${currentFY}` : ""}
             </p>
             <button
-              onClick={() => onNavigate("capital-gains")}
+              onClick={() => onNavigate("reports")}
               className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-0.5 transition-colors"
             >
               View details <ArrowUpRight className="size-3" />

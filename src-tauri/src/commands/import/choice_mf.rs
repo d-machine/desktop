@@ -21,6 +21,12 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+// ─── Extraction parameters ────────────────────────────────────────────────────
+
+const X_GAP:      f32 = 6.0;
+const CHAR_Y_TOL: f32 = 2.0;
+const ROW_Y_TOL:  f32 = 5.0;
+
 // ─── Column definitions ───────────────────────────────────────────────────────
 
 /// Format A: 7-column (older individual reports — no Family/Client columns)
@@ -179,8 +185,8 @@ fn detect_format(page_spans: &[pdf_utils::TextSpan]) -> PdfFormat {
 
 /// Parse a Choice Wealth MF Transaction Report PDF.
 #[tauri::command]
-pub fn parse_choice_mf_pdf(file_path: String) -> Result<ChoiceMfParseResult, String> {
-    let all_pages = pdf_utils::extract_all_page_spans(&file_path)?;
+pub fn parse_choice_mf_pdf(file_path: String, password: Option<String>) -> Result<ChoiceMfParseResult, String> {
+    let all_pages = pdf_utils::extract_all_page_spans_pwd_cfg(&file_path, password.as_deref(), X_GAP, CHAR_Y_TOL)?;
 
     // Detect format from page 1
     let fmt = all_pages.first()
@@ -196,7 +202,7 @@ pub fn parse_choice_mf_pdf(file_path: String) -> Result<ChoiceMfParseResult, Str
     let mut pending: Option<ParsedMfTransaction>   = None;
 
     for page_spans in all_pages {
-        let rows = pdf_utils::page_spans_to_rows(page_spans, 5.0);
+        let rows = pdf_utils::page_spans_to_rows(page_spans, ROW_Y_TOL);
 
         for row in rows {
             if row.is_empty() {
@@ -320,7 +326,7 @@ pub fn import_choice_mf_transactions(
     let mut skipped      = 0usize;
     let mut auto_created = 0usize;
 
-    let mf_type_id: i64 = conn
+    let _mf_type_id: i64 = conn
         .query_row(
             "SELECT instrument_type_id FROM instrument_types WHERE name='EQUITY_MF' LIMIT 1",
             [],
@@ -340,10 +346,10 @@ pub fn import_choice_mf_transactions(
             continue;
         }
 
-        // Resolve instrument by ISIN
-        let mut instrument_id: Option<i64> = if !txn.isin.is_empty() {
+        // Resolve instrument locally by ISIN
+        let resolved_id: Option<i64> = if !txn.isin.is_empty() {
             conn.query_row(
-                "SELECT instrument_id FROM instruments WHERE isin = ?1 LIMIT 1",
+                "SELECT instrument_id FROM instrument_equity WHERE isin = ?1 LIMIT 1",
                 [&txn.isin],
                 |row| row.get(0),
             )
@@ -352,65 +358,46 @@ pub fn import_choice_mf_transactions(
             None
         };
 
-        // Auto-create instrument if not found
-        if instrument_id.is_none() && !txn.scheme_name.is_empty() {
-            let isin_val: Option<&str> = if txn.isin.is_empty() { None } else { Some(&txn.isin) };
-            conn.execute(
-                "INSERT OR IGNORE INTO instruments (isin, name, instrument_type_id, source)
-                 VALUES (?1, ?2, ?3, 'IMPORT')",
-                rusqlite::params![isin_val, txn.scheme_name, mf_type_id],
-            )
-            .map_err(|e| e.to_string())?;
-
-            instrument_id = if !txn.isin.is_empty() {
-                conn.query_row(
-                    "SELECT instrument_id FROM instruments WHERE isin = ?1 LIMIT 1",
-                    [&txn.isin],
-                    |row| row.get(0),
+        // If not found locally, stage in pending_instruments for async server resolution
+        let (instrument_id, pending_instrument_id): (Option<i64>, Option<i64>) =
+            if let Some(id) = resolved_id {
+                (Some(id), None)
+            } else if !txn.scheme_name.is_empty() {
+                let isin_val: Option<&str> = if txn.isin.is_empty() { None } else { Some(&txn.isin) };
+                conn.execute(
+                    "INSERT INTO pending_instruments (instrument_type, name, isin)
+                     VALUES ('EQUITY_MF', ?1, ?2)",
+                    rusqlite::params![txn.scheme_name, isin_val],
                 )
-                .ok()
-            } else {
-                conn.query_row(
-                    "SELECT instrument_id FROM instruments WHERE name = ?1
-                     ORDER BY instrument_id DESC LIMIT 1",
-                    [&txn.scheme_name],
-                    |row| row.get(0),
-                )
-                .ok()
-            };
-
-            if instrument_id.is_some() {
+                .map_err(|e| e.to_string())?;
                 auto_created += 1;
-            }
-        }
-
-        let instrument_id = match instrument_id {
-            Some(id) => id,
-            None     => { skipped += 1; continue; }
-        };
+                (None, Some(conn.last_insert_rowid()))
+            } else {
+                skipped += 1;
+                continue;
+            };
 
         let nav_paise = (txn.nav_rs * 100.0).round() as i64;
 
         // Deduplicate: same account + instrument + date + NAV + type
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transactions
-                 WHERE account_id=?1 AND instrument_id=?2 AND trade_date=?3
-                   AND price_paise=?4 AND txn_type=?5",
-                rusqlite::params![account_id, instrument_id, txn.trade_date, nav_paise, txn.txn_type],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-
-        if exists {
-            skipped += 1;
-            continue;
+        // Dedup only meaningful for resolved instruments (pending have no prior txns)
+        if let Some(iid) = instrument_id {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM transactions
+                     WHERE account_id=?1 AND instrument_id=?2 AND trade_date=?3
+                       AND price_paise=?4 AND txn_type=?5",
+                    rusqlite::params![account_id, iid, txn.trade_date, nav_paise, txn.txn_type],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if exists { skipped += 1; continue; }
         }
 
         // Cash flow sign: BUY/SIP/SWITCH_IN = outflow (negative), REDEMPTION = inflow
-        let gross              = (txn.units * txn.nav_rs * 100.0).round() as i64;
-        let total_value_paise  = match txn.txn_type.as_str() {
+        let gross             = (txn.units * txn.nav_rs * 100.0).round() as i64;
+        let total_value_paise = match txn.txn_type.as_str() {
             "BUY" | "SIP" | "SWITCH_IN" => -gross,
             _                            =>  gross,
         };
@@ -422,12 +409,12 @@ pub fn import_choice_mf_transactions(
 
         conn.execute(
             "INSERT INTO transactions
-                (account_id, instrument_id, txn_type, trade_segment, trade_date,
-                 quantity, price_paise, brokerage_paise, stt_paise, other_charges_paise,
-                 total_value_paise, notes)
-             VALUES (?1,?2,?3,'MF',?4,?5,?6,0,0,0,?7,?8)",
+                (account_id, instrument_id, pending_instrument_id, txn_type, trade_segment,
+                 trade_date, quantity, price_paise, brokerage_paise, stt_paise,
+                 other_charges_paise, total_value_paise, notes)
+             VALUES (?1,?2,?3,?4,'MF',?5,?6,?7,0,0,0,?8,?9)",
             rusqlite::params![
-                account_id, instrument_id, txn.txn_type,
+                account_id, instrument_id, pending_instrument_id, txn.txn_type,
                 txn.trade_date, txn.units, nav_paise,
                 total_value_paise, notes,
             ],
@@ -451,7 +438,7 @@ mod tests {
             eprintln!("SKIP: file not found: {path}");
             return;
         }
-        let result = parse_choice_mf_pdf(path.to_string()).expect("parse failed");
+        let result = parse_choice_mf_pdf(path.to_string(), None).expect("parse failed");
         println!("File: {path}");
         println!("  Total: {}  Skipped: {}", result.total_rows, result.skipped_rows);
         for t in result.transactions.iter().take(5) {

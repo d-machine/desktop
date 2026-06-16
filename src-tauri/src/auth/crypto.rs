@@ -1,5 +1,5 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng as AeadOsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -117,9 +117,4 @@ pub fn unwrap_key(wrapped: &WrappedKey, secret: &str) -> Result<[u8; KEY_LEN]> {
     let mut master_key = [0u8; KEY_LEN];
     master_key.copy_from_slice(&plaintext);
     Ok(master_key)
-}
-
-/// Convert a master key to a hex string for use as SQLCipher PRAGMA key.
-pub fn key_to_hex(key: &[u8; KEY_LEN]) -> String {
-    format!("x'{}'", hex::encode(key))
 }

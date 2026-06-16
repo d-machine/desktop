@@ -32,3 +32,10 @@ export function rupeesToPaise(rupees: string): number {
   if (isNaN(val)) return 0;
   return Math.round(val * 100);
 }
+
+/** Return Indian financial year string for an ISO date, e.g. "2025-26" */
+export function dateToFY(isoDate: string): string {
+  const [year, month] = isoDate.split("-").map(Number);
+  const fyStart = month >= 4 ? year : year - 1;
+  return `${fyStart}-${String(fyStart + 1).slice(-2)}`;
+}

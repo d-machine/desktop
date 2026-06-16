@@ -1,6 +1,7 @@
 use crate::db;
-use crate::commands::import::flag_oversells;
+use crate::commands::import::{common, flag_oversells};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Serialize)]
 pub struct Transaction {
@@ -32,19 +33,25 @@ pub struct Transaction {
 
 #[derive(Deserialize)]
 pub struct CreateTransactionInput {
-    pub account_id: i64,
-    pub instrument_id: i64,
-    pub txn_type: String,
-    pub trade_segment: String,
-    pub trade_date: String,
-    pub txn_time: Option<String>,
-    pub quantity: f64,
-    pub price_paise: i64,
-    pub brokerage_paise: i64,
-    pub stt_paise: i64,
+    pub account_id:          i64,
+    /// Resolved instrument — mutually exclusive with the two pending options.
+    pub instrument_id:       Option<i64>,
+    /// Link to an *existing* pending_instruments row (selected from search).
+    /// No new row is created — we just reference the existing pending_id.
+    pub existing_pending_id: Option<i64>,
+    /// New pending instrument to stage — creates a new pending_instruments row.
+    pub pending_instrument:  Option<common::PendingInstrumentSpec>,
+    pub txn_type:            String,
+    pub trade_segment:      String,
+    pub trade_date:         String,
+    pub txn_time:           Option<String>,
+    pub quantity:           f64,
+    pub price_paise:        i64,
+    pub brokerage_paise:    i64,
+    pub stt_paise:          i64,
     pub other_charges_paise: i64,
-    pub notes: Option<String>,
-    pub broker_ref: Option<String>,
+    pub notes:              Option<String>,
+    pub broker_ref:         Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,15 +71,21 @@ pub struct UpdateTransactionInput {
 
 #[derive(Deserialize)]
 pub struct GetTransactionsFilter {
-    pub account_ids: Option<Vec<i64>>,
+    pub account_ids:  Option<Vec<i64>>,
     pub instrument_id: Option<i64>,
-    pub from_date: Option<String>,
-    pub to_date: Option<String>,
-    pub txn_type: Option<String>,
+    pub from_date:    Option<String>,
+    pub to_date:      Option<String>,
+    pub txn_type:     Option<String>,
     /// "all" | "flagged" | "clean"
-    pub flag_filter: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
+    pub flag_filter:  Option<String>,
+    /// Free-text search matched against instrument name, account name, txn_type
+    pub search:       Option<String>,
+    /// Column to sort by: "trade_date" | "instrument_name" | "quantity" | "price_paise" | "total_value_paise"
+    pub sort_col:     Option<String>,
+    /// "asc" | "desc"
+    pub sort_dir:     Option<String>,
+    pub limit:        Option<i64>,
+    pub offset:       Option<i64>,
 }
 
 #[tauri::command]
@@ -82,7 +95,9 @@ pub fn get_transactions(filter: GetTransactionsFilter) -> Result<Vec<Transaction
     let mut sql = String::from(
         "SELECT t.txn_id, t.account_id, a.name AS account_name,
                 a.portfolio_id,
-                t.instrument_id, i.name AS instrument_name, i.isin,
+                COALESCE(t.instrument_id, -t.pending_instrument_id) AS instrument_id,
+                COALESCE(i.name, pi.name)                           AS instrument_name,
+                ie.isin,
                 t.txn_type, t.trade_segment, t.trade_date, t.txn_time,
                 t.quantity, t.price_paise, t.brokerage_paise,
                 t.stt_paise, t.other_charges_paise, t.total_value_paise,
@@ -91,7 +106,9 @@ pub fn get_transactions(filter: GetTransactionsFilter) -> Result<Vec<Transaction
                 t.batch_id
          FROM transactions t
          JOIN accounts a ON t.account_id = a.account_id
-         JOIN instruments i ON t.instrument_id = i.instrument_id
+         LEFT JOIN instruments i ON i.instrument_id = t.instrument_id
+         LEFT JOIN pending_instruments pi ON pi.pending_id = t.pending_instrument_id
+         LEFT JOIN instrument_equity ie ON ie.instrument_id = t.instrument_id
          WHERE 1=1",
     );
 
@@ -105,19 +122,40 @@ pub fn get_transactions(filter: GetTransactionsFilter) -> Result<Vec<Transaction
     if filter.from_date.is_some()    { sql.push_str(" AND t.trade_date >= ?"); }
     if filter.to_date.is_some()      { sql.push_str(" AND t.trade_date <= ?"); }
     if filter.txn_type.is_some()     { sql.push_str(" AND t.txn_type = ?"); }
-    if filter.instrument_id.is_some(){ sql.push_str(" AND t.instrument_id = ?"); }
+    if let Some(id) = filter.instrument_id {
+        if id < 0 {
+            sql.push_str(" AND t.pending_instrument_id = ?");
+        } else {
+            sql.push_str(" AND t.instrument_id = ?");
+        }
+    }
 
     match filter.flag_filter.as_deref() {
         Some("flagged") => sql.push_str(" AND t.flag IS NOT NULL AND t.flag_dismissed = 0"),
         Some("clean")   => sql.push_str(" AND (t.flag IS NULL OR t.flag_dismissed = 1)"),
         _               => {}
     }
+    if filter.search.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+        sql.push_str(
+            " AND (COALESCE(i.name, pi.name) LIKE ? OR a.name LIKE ? OR t.txn_type LIKE ?)"
+        );
+    }
 
-    sql.push_str(" ORDER BY t.trade_date DESC, t.txn_id DESC");
-    sql.push_str(&format!(" LIMIT {} OFFSET {}",
-        filter.limit.unwrap_or(200),
-        filter.offset.unwrap_or(0)
-    ));
+    let sort_col = match filter.sort_col.as_deref() {
+        Some("instrument_name")   => "COALESCE(i.name, pi.name)",
+        Some("quantity")          => "t.quantity",
+        Some("price_paise")       => "t.price_paise",
+        Some("total_value_paise") => "t.total_value_paise",
+        _                         => "t.trade_date",
+    };
+    let sort_dir = if filter.sort_dir.as_deref() == Some("asc") { "ASC" } else { "DESC" };
+    sql.push_str(&format!(" ORDER BY {} {}, t.txn_id DESC", sort_col, sort_dir));
+
+    match (filter.limit, filter.offset) {
+        (Some(limit), offset) => sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset.unwrap_or(0))),
+        (None, Some(offset))  => sql.push_str(&format!(" LIMIT -1 OFFSET {}", offset)),
+        (None, None)          => {}
+    }
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
     if let Some(ids) = &filter.account_ids {
@@ -126,7 +164,17 @@ pub fn get_transactions(filter: GetTransactionsFilter) -> Result<Vec<Transaction
     if let Some(d) = &filter.from_date   { params.push(Box::new(d.clone())); }
     if let Some(d) = &filter.to_date     { params.push(Box::new(d.clone())); }
     if let Some(t) = &filter.txn_type    { params.push(Box::new(t.clone())); }
-    if let Some(id) = filter.instrument_id { params.push(Box::new(id)); }
+    if let Some(id) = filter.instrument_id {
+        if id < 0 { params.push(Box::new(-id)); } else { params.push(Box::new(id)); }
+    }
+    if let Some(s) = &filter.search {
+        if !s.is_empty() {
+            let term = format!("%{}%", s);
+            params.push(Box::new(term.clone()));
+            params.push(Box::new(term.clone()));
+            params.push(Box::new(term));
+        }
+    }
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let txns = stmt.query_map(
@@ -140,27 +188,135 @@ pub fn get_transactions(filter: GetTransactionsFilter) -> Result<Vec<Transaction
     Ok(txns)
 }
 
+/// Returns the total number of transactions matching the same filter as `get_transactions`
+/// (without limit/offset/sort). Used by the frontend for pagination controls.
+#[tauri::command]
+pub fn get_transactions_count(filter: GetTransactionsFilter) -> Result<i64, String> {
+    let conn = db::acquire()?;
+
+    let mut sql = String::from(
+        "SELECT COUNT(*)
+         FROM transactions t
+         JOIN accounts a ON t.account_id = a.account_id
+         LEFT JOIN instruments i ON i.instrument_id = t.instrument_id
+         LEFT JOIN pending_instruments pi ON pi.pending_id = t.pending_instrument_id
+         LEFT JOIN instrument_equity ie ON ie.instrument_id = t.instrument_id
+         WHERE 1=1",
+    );
+
+    if filter.account_ids.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+        let placeholders = filter.account_ids.as_ref().unwrap()
+            .iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>().join(",");
+        sql.push_str(&format!(" AND t.account_id IN ({})", placeholders));
+    }
+    if filter.from_date.is_some()    { sql.push_str(" AND t.trade_date >= ?"); }
+    if filter.to_date.is_some()      { sql.push_str(" AND t.trade_date <= ?"); }
+    if filter.txn_type.is_some()     { sql.push_str(" AND t.txn_type = ?"); }
+    if let Some(id) = filter.instrument_id {
+        if id < 0 { sql.push_str(" AND t.pending_instrument_id = ?"); }
+        else       { sql.push_str(" AND t.instrument_id = ?"); }
+    }
+    match filter.flag_filter.as_deref() {
+        Some("flagged") => sql.push_str(" AND t.flag IS NOT NULL AND t.flag_dismissed = 0"),
+        Some("clean")   => sql.push_str(" AND (t.flag IS NULL OR t.flag_dismissed = 1)"),
+        _               => {}
+    }
+    if filter.search.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+        sql.push_str(
+            " AND (COALESCE(i.name, pi.name) LIKE ? OR a.name LIKE ? OR t.txn_type LIKE ?)"
+        );
+    }
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    if let Some(ids) = &filter.account_ids {
+        for id in ids { params.push(Box::new(*id)); }
+    }
+    if let Some(d) = &filter.from_date   { params.push(Box::new(d.clone())); }
+    if let Some(d) = &filter.to_date     { params.push(Box::new(d.clone())); }
+    if let Some(t) = &filter.txn_type    { params.push(Box::new(t.clone())); }
+    if let Some(id) = filter.instrument_id {
+        if id < 0 { params.push(Box::new(-id)); } else { params.push(Box::new(id)); }
+    }
+    if let Some(s) = &filter.search {
+        if !s.is_empty() {
+            let term = format!("%{}%", s);
+            params.push(Box::new(term.clone()));
+            params.push(Box::new(term.clone()));
+            params.push(Box::new(term));
+        }
+    }
+
+    conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
+/// Returns the count of flagged, non-dismissed transactions for the given accounts.
+/// Counts across all pages — not limited to the current page.
+#[tauri::command]
+pub fn get_flagged_count(account_ids: Option<Vec<i64>>) -> Result<i64, String> {
+    let conn = db::acquire()?;
+    let mut sql = String::from(
+        "SELECT COUNT(*) FROM transactions t
+         WHERE t.flag IS NOT NULL AND t.flag_dismissed = 0",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    if let Some(ids) = &account_ids {
+        if !ids.is_empty() {
+            let ph = ids.iter().enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>().join(",");
+            sql.push_str(&format!(" AND t.account_id IN ({})", ph));
+            for id in ids { params.push(Box::new(*id)); }
+        }
+    }
+    conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn create_transaction(input: CreateTransactionInput) -> Result<Transaction, String> {
+    // Resolve instrument_id / pending_instrument_id
+    let (instrument_id, pending_instrument_id): (Option<i64>, Option<i64>) =
+        if let Some(id) = input.instrument_id {
+            (Some(id), None)
+        } else if let Some(pid) = input.existing_pending_id {
+            (None, Some(pid))
+        } else if let Some(spec) = &input.pending_instrument {
+            let pid = common::create_pending_instrument(spec)?;
+            (None, Some(pid))
+        } else {
+            return Err("instrument_id, existing_pending_id, or pending_instrument must be provided".to_string());
+        };
+
     let conn = db::acquire()?;
 
     let gross   = (input.quantity * input.price_paise as f64) as i64;
     let charges = input.brokerage_paise + input.stt_paise + input.other_charges_paise;
     let total_value_paise = match input.txn_type.as_str() {
-        "BUY" | "SIP" | "OPENING_BALANCE" | "TRANSFER_IN" => -(gross + charges),
-        "SELL" | "REDEMPTION" | "TRANSFER_OUT"            =>   gross - charges,
-        "DIVIDEND" | "INTEREST"                            =>   gross,
-        _                                                  =>   gross,
+        "BUY" | "SIP" | "IPO" | "FPO" | "OPENING_BALANCE"
+        | "TRANSFER_IN" | "SPLIT_IN" | "MERGER_IN" | "SWITCH_IN" => -(gross + charges),
+        "SELL" | "REDEMPTION" | "TRANSFER_OUT" | "SPLIT_OUT"
+        | "MERGER_OUT" | "SWITCH_OUT"                            =>   gross - charges,
+        "DIVIDEND" | "INTEREST"                                   =>   gross,
+        _                                                         =>   gross,
     };
 
     conn.execute(
         "INSERT INTO transactions
-            (account_id, instrument_id, txn_type, trade_segment, trade_date, txn_time,
-             quantity, price_paise, brokerage_paise, stt_paise, other_charges_paise,
-             total_value_paise, notes, broker_ref)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            (account_id, instrument_id, pending_instrument_id, txn_type, trade_segment,
+             trade_date, txn_time, quantity, price_paise, brokerage_paise, stt_paise,
+             other_charges_paise, total_value_paise, notes, broker_ref)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         rusqlite::params![
-            input.account_id, input.instrument_id, input.txn_type,
+            input.account_id, instrument_id, pending_instrument_id, input.txn_type,
             input.trade_segment, input.trade_date, input.txn_time,
             input.quantity, input.price_paise, input.brokerage_paise,
             input.stt_paise, input.other_charges_paise,
@@ -195,10 +351,12 @@ pub fn update_transaction(input: UpdateTransactionInput) -> Result<Transaction, 
     let gross   = (input.quantity * input.price_paise as f64) as i64;
     let charges = input.brokerage_paise + input.stt_paise + input.other_charges_paise;
     let total_value_paise = match input.txn_type.as_str() {
-        "BUY" | "SIP" | "OPENING_BALANCE" | "TRANSFER_IN" => -(gross + charges),
-        "SELL" | "REDEMPTION" | "TRANSFER_OUT"            =>   gross - charges,
-        "DIVIDEND" | "INTEREST"                            =>   gross,
-        _                                                  =>   gross,
+        "BUY" | "SIP" | "IPO" | "FPO" | "OPENING_BALANCE"
+        | "TRANSFER_IN" | "SPLIT_IN" | "MERGER_IN" | "SWITCH_IN" => -(gross + charges),
+        "SELL" | "REDEMPTION" | "TRANSFER_OUT" | "SPLIT_OUT"
+        | "MERGER_OUT" | "SWITCH_OUT"                            =>   gross - charges,
+        "DIVIDEND" | "INTEREST"                                   =>   gross,
+        _                                                         =>   gross,
     };
 
     conn.execute(
@@ -349,6 +507,22 @@ pub fn transfer_holding(input: TransferHoldingInput) -> Result<TransferResult, S
         ).map_err(|e| { let _ = conn.execute_batch("ROLLBACK"); e.to_string() })?;
         let in_id = conn.last_insert_rowid();
 
+        let ca_data = json!({
+            "type":               "TRANSFER",
+            "transfer_date":      input.trade_date,
+            "from_account_id":    input.from_account_id,
+            "to_account_id":      input.to_account_id,
+            "instrument_id":      input.instrument_id,
+            "quantity":           input.quantity,
+            "price_paise":        input.price_paise,
+            "transfer_out_txn_id": out_id,
+            "transfer_in_txn_id":  in_id,
+        }).to_string();
+        conn.execute(
+            "INSERT INTO corporate_actions (data) VALUES (?1)",
+            [&ca_data],
+        ).map_err(|e| { let _ = conn.execute_batch("ROLLBACK"); e.to_string() })?;
+
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
         (out_id, in_id)
     };
@@ -359,10 +533,134 @@ pub fn transfer_holding(input: TransferHoldingInput) -> Result<TransferResult, S
     Ok(TransferResult { transfer_out_txn_id: out_id, transfer_in_txn_id: in_id })
 }
 
+#[derive(Deserialize)]
+pub struct CreateSplitInput {
+    pub account_id:            i64,
+    /// Unified instrument_id from the holdings view: positive = resolved, negative = pending.
+    pub from_instrument_id:    i64,
+    /// Resolved instrument for the post-split instrument, if already in the catalog.
+    pub to_instrument_id:      Option<i64>,
+    /// Create a new pending instrument for the post-split side (mutually exclusive with to_instrument_id).
+    pub to_pending:            Option<common::PendingInstrumentSpec>,
+    pub qty_before:            f64,
+    pub qty_after:             f64,
+    /// User-supplied avg cost per share for the pre-split position (in paise).
+    /// Used to compute the post-split per-share cost so total cost basis is preserved.
+    pub avg_cost_before_paise: i64,
+    pub trade_date:            String,
+    pub notes:                 Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CreateSplitResult {
+    pub ca_id:            i64,
+    pub split_out_txn_id: i64,
+    pub split_in_txn_id:  i64,
+}
+
+/// Record a stock split / ISIN succession as a SPLIT_OUT + SPLIT_IN pair,
+/// with an audit row in corporate_actions.
+///
+/// Cost basis is preserved: total_cost = qty_before × avg_cost_before.
+/// The SPLIT_IN price is set to total_cost / qty_after so the position
+/// carries the same total cost under the new instrument.
+#[tauri::command]
+pub fn create_split(input: CreateSplitInput) -> Result<CreateSplitResult, String> {
+    // Decode from_instrument (positive = instrument_id, negative = pending_id)
+    let (from_instr_id, from_pending_id): (Option<i64>, Option<i64>) =
+        if input.from_instrument_id > 0 {
+            (Some(input.from_instrument_id), None)
+        } else {
+            (None, Some(-input.from_instrument_id))
+        };
+
+    // Resolve to_instrument
+    let (to_instr_id, to_pending_id): (Option<i64>, Option<i64>) =
+        if let Some(id) = input.to_instrument_id {
+            (Some(id), None)
+        } else if let Some(spec) = &input.to_pending {
+            let pid = common::create_pending_instrument(spec)?;
+            (None, Some(pid))
+        } else {
+            return Err("to_instrument_id or to_pending must be provided".to_string());
+        };
+
+    let total_cost_paise = (input.qty_before * input.avg_cost_before_paise as f64).round() as i64;
+    let price_after_paise = if input.qty_after > 0.0 {
+        (total_cost_paise as f64 / input.qty_after).round() as i64
+    } else { 0 };
+
+    let (out_id, in_id, ca_id) = {
+        let conn = db::acquire()?;
+        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "INSERT INTO transactions
+                (account_id, instrument_id, pending_instrument_id,
+                 txn_type, trade_segment, trade_date,
+                 quantity, price_paise, brokerage_paise, stt_paise,
+                 other_charges_paise, total_value_paise, notes)
+             VALUES (?1,?2,?3,'SPLIT_OUT','DELIVERY',?4,?5,?6,0,0,0,?7,?8)",
+            rusqlite::params![
+                input.account_id, from_instr_id, from_pending_id,
+                input.trade_date,
+                input.qty_before, input.avg_cost_before_paise,
+                total_cost_paise,   // positive = proceeds (sell-like)
+                input.notes,
+            ],
+        ).map_err(|e| { let _ = conn.execute_batch("ROLLBACK"); e.to_string() })?;
+        let out_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO transactions
+                (account_id, instrument_id, pending_instrument_id,
+                 txn_type, trade_segment, trade_date,
+                 quantity, price_paise, brokerage_paise, stt_paise,
+                 other_charges_paise, total_value_paise, notes)
+             VALUES (?1,?2,?3,'SPLIT_IN','DELIVERY',?4,?5,?6,0,0,0,?7,?8)",
+            rusqlite::params![
+                input.account_id, to_instr_id, to_pending_id,
+                input.trade_date,
+                input.qty_after, price_after_paise,
+                -total_cost_paise,  // negative = cost (buy-like)
+                input.notes,
+            ],
+        ).map_err(|e| { let _ = conn.execute_batch("ROLLBACK"); e.to_string() })?;
+        let in_id = conn.last_insert_rowid();
+
+        let ca_data = json!({
+            "type":                  "SPLIT",
+            "ex_date":               input.trade_date,
+            "account_id":            input.account_id,
+            "from_instrument_id":    input.from_instrument_id,
+            "to_instrument_id":      input.to_instrument_id,
+            "qty_before":            input.qty_before,
+            "qty_after":             input.qty_after,
+            "avg_cost_before_paise": input.avg_cost_before_paise,
+            "split_out_txn_id":      out_id,
+            "split_in_txn_id":       in_id,
+        }).to_string();
+        conn.execute(
+            "INSERT INTO corporate_actions (data) VALUES (?1)",
+            [&ca_data],
+        ).map_err(|e| { let _ = conn.execute_batch("ROLLBACK"); e.to_string() })?;
+        let ca_id = conn.last_insert_rowid();
+
+        conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+        (out_id, in_id, ca_id)
+    };
+
+    flag_oversells(input.account_id)?;
+
+    Ok(CreateSplitResult { ca_id, split_out_txn_id: out_id, split_in_txn_id: in_id })
+}
+
 fn get_transaction_by_id(conn: &rusqlite::Connection, id: i64) -> rusqlite::Result<Transaction> {
     conn.query_row(
         "SELECT t.txn_id, t.account_id, a.name, a.portfolio_id,
-                t.instrument_id, i.name, i.isin,
+                COALESCE(t.instrument_id, -t.pending_instrument_id) AS instrument_id,
+                COALESCE(i.name, pi.name)                           AS instrument_name,
+                ie.isin,
                 t.txn_type, t.trade_segment, t.trade_date, t.txn_time,
                 t.quantity, t.price_paise, t.brokerage_paise,
                 t.stt_paise, t.other_charges_paise, t.total_value_paise,
@@ -371,7 +669,9 @@ fn get_transaction_by_id(conn: &rusqlite::Connection, id: i64) -> rusqlite::Resu
                 t.batch_id
          FROM transactions t
          JOIN accounts a ON t.account_id = a.account_id
-         JOIN instruments i ON t.instrument_id = i.instrument_id
+         LEFT JOIN instruments i ON i.instrument_id = t.instrument_id
+         LEFT JOIN pending_instruments pi ON pi.pending_id = t.pending_instrument_id
+         LEFT JOIN instrument_equity ie ON ie.instrument_id = t.instrument_id
          WHERE t.txn_id = ?1",
         [id],
         map_row,
@@ -465,7 +765,9 @@ pub fn get_import_batch(batch_id: i64) -> Result<ImportBatch, String> {
 
     let mut stmt = conn.prepare(
         "SELECT t.txn_id, t.account_id, a.name, a.portfolio_id,
-                t.instrument_id, i.name, i.isin,
+                COALESCE(t.instrument_id, -t.pending_instrument_id) AS instrument_id,
+                COALESCE(i.name, pi.name)                           AS instrument_name,
+                ie.isin,
                 t.txn_type, t.trade_segment, t.trade_date, t.txn_time,
                 t.quantity, t.price_paise, t.brokerage_paise, t.stt_paise,
                 t.other_charges_paise, t.total_value_paise,
@@ -473,7 +775,9 @@ pub fn get_import_batch(batch_id: i64) -> Result<ImportBatch, String> {
                 t.flag, t.flag_reason, t.flag_dismissed, t.batch_id
          FROM transactions t
          JOIN accounts a ON a.account_id = t.account_id
-         JOIN instruments i ON i.instrument_id = t.instrument_id
+         LEFT JOIN instruments i ON i.instrument_id = t.instrument_id
+         LEFT JOIN pending_instruments pi ON pi.pending_id = t.pending_instrument_id
+         LEFT JOIN instrument_equity ie ON ie.instrument_id = t.instrument_id
          WHERE t.batch_id = ?1
          ORDER BY t.trade_date, t.txn_time, t.txn_id",
     ).map_err(|e| e.to_string())?;

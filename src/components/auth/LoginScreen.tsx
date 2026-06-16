@@ -20,20 +20,26 @@ export function LoginScreen({ onUnlocked }: LoginScreenProps) {
     return <ForgotPinFlow onRecovered={onUnlocked} onBack={() => setShowForgot(false)} />;
   }
 
-  const handleLogin = async () => {
-    if (pin.length < 6) return;
+  const handleLogin = async (pinValue?: string) => {
+    const currentPin = pinValue ?? pin;
+    if (currentPin.length < 6) return;
     setLoading(true);
     setError("");
     try {
-      await invoke("login", { pin });
+      await invoke("login", { pin: currentPin });
       onUnlocked();
-    } catch {
-      const next = attempts + 1;
-      setAttempts(next);
-      setError(next >= 5
-        ? "Too many wrong attempts. Use your recovery file to reset your PIN."
-        : `Wrong PIN. ${5 - next} attempt${5 - next === 1 ? "" : "s"} remaining.`
-      );
+    } catch (e: unknown) {
+      const msg = String(e);
+      if (msg.includes("Wrong PIN")) {
+        const next = attempts + 1;
+        setAttempts(next);
+        setError(next >= 5
+          ? "Too many wrong attempts. Use your recovery file to reset your PIN."
+          : `Wrong PIN. ${5 - next} attempt${5 - next === 1 ? "" : "s"} remaining.`
+        );
+      } else {
+        setError(`Login error: ${msg}`);
+      }
     } finally {
       setLoading(false);
       setPin("");
@@ -49,14 +55,16 @@ export function LoginScreen({ onUnlocked }: LoginScreenProps) {
         </CardHeader>
         <CardContent className="space-y-6">
           <PinInput
+            key={attempts}
             onChange={(p) => { setPin(p); setError(""); }}
+            onComplete={(p) => handleLogin(p)}
             error={!!error}
             disabled={loading || attempts >= 5}
           />
           {error && <p className="text-destructive text-sm text-center">{error}</p>}
           <Button
             className="w-full"
-            onClick={handleLogin}
+            onClick={() => handleLogin()}
             disabled={pin.length < 6 || loading || attempts >= 5}
           >
             {loading ? "Unlocking…" : "Unlock"}

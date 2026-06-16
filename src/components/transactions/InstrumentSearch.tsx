@@ -2,14 +2,17 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PendingInstrumentForm, PendingInstrumentSpec, PendingInstrumentInitialValues, AssetClass } from "./PendingInstrumentForm";
 
-interface InstrumentSummary {
-  instrument_id: number;
+export interface InstrumentSummary {
+  instrument_id: number;      // positive = resolved, negative = pending (-pending_id)
   isin?: string;
   name: string;
   asset_class: string;
   exchange_code?: string;
   nse_symbol?: string;
+  pending_instrument?: PendingInstrumentSpec;    // set when creating a new pending
+  pending_instrument_id?: number;               // set when linking an existing pending
 }
 
 interface InstrumentSearchProps {
@@ -19,13 +22,31 @@ interface InstrumentSearchProps {
   disabled?: boolean;
 }
 
+/** Parse `pending_metadata` JSON from the server into PendingInstrumentForm's field map. */
+function parseInitialValues(name: string, assetClass: string, metadataJson?: string): PendingInstrumentInitialValues {
+  const type = (assetClass as AssetClass) ?? "EQUITY";
+  let fields: Record<string, string> = { name };
+  if (metadataJson) {
+    try {
+      const meta = JSON.parse(metadataJson) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(meta)) {
+        if (v != null) fields[k] = String(v);
+      }
+    } catch { /* ignore malformed JSON */ }
+  }
+  return { name, type, fields };
+}
+
 export function InstrumentSearch({ value, onChange, placeholder = "Search by name, ISIN or symbol…", disabled }: InstrumentSearchProps) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<InstrumentSummary[]>([]);
+  const [results, setResults] = useState<(InstrumentSummary & { pending_instrument_id?: number; pending_metadata?: string })[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [pendingInitial, setPendingInitial] = useState<PendingInstrumentInitialValues | undefined>(undefined);
+  const [existingPendingId, setExistingPendingId] = useState<number | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     if (query.length < 2) { setResults([]); setOpen(false); return; }
@@ -33,7 +54,9 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
       try {
-        const r = await invoke<InstrumentSummary[]>("search_instruments", { query });
+        const r = await invoke<(InstrumentSummary & { pending_instrument_id?: number; pending_metadata?: string })[]>(
+          "search_instruments", { query }
+        );
         setResults(r);
         setOpen(r.length > 0);
       } finally {
@@ -43,7 +66,6 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
     return () => clearTimeout(debounceRef.current);
   }, [query]);
 
-  // Close on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -54,15 +76,54 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const select = (instrument: InstrumentSummary) => {
+  const selectResolved = (instrument: InstrumentSummary) => {
     onChange(instrument);
     setQuery("");
     setOpen(false);
+    setShowManual(false);
+    setPendingInitial(undefined);
+    setExistingPendingId(undefined);
+  };
+
+  const selectExistingPending = (r: InstrumentSummary & { pending_instrument_id?: number; pending_metadata?: string }) => {
+    setOpen(false);
+    setExistingPendingId(r.pending_instrument_id);
+    setPendingInitial(parseInitialValues(r.name, r.asset_class, r.pending_metadata));
+    setShowManual(true);
   };
 
   const clear = () => {
     onChange(null as any);
     setQuery("");
+    setShowManual(false);
+    setPendingInitial(undefined);
+    setExistingPendingId(undefined);
+  };
+
+  const handleManualConfirm = async (spec: PendingInstrumentSpec) => {
+    if (existingPendingId != null) {
+      // Enrich existing pending instrument's metadata in-place
+      await invoke("update_pending_instrument", {
+        pendingId: existingPendingId,
+        name: spec.name,
+        metadata: spec.metadata,
+      }).catch(() => { /* non-fatal — transaction still links correctly */ });
+
+      selectResolved({
+        instrument_id:        -existingPendingId,
+        name:                 spec.name,
+        asset_class:          spec.type,
+        pending_instrument_id: existingPendingId,
+      });
+    } else {
+      // New pending instrument — created on save by create_transaction
+      selectResolved({
+        instrument_id:      -1,
+        name:               spec.name,
+        asset_class:        spec.type,
+        pending_instrument: spec,
+      });
+    }
   };
 
   if (value) {
@@ -73,7 +134,13 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
           <div className="text-xs text-muted-foreground">
             {value.isin && <span className="mr-2">{value.isin}</span>}
             {value.nse_symbol && <span className="mr-2">{value.nse_symbol}</span>}
-            <span>{value.asset_class}</span>
+            <span className={cn(
+              "px-1.5 py-0.5 rounded text-xs",
+              (value.pending_instrument || value.pending_instrument_id != null) &&
+                "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400",
+            )}>
+              {(value.pending_instrument || value.pending_instrument_id != null) ? "PENDING" : value.asset_class}
+            </span>
           </div>
         </div>
         {!disabled && (
@@ -82,6 +149,17 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
           </button>
         )}
       </div>
+    );
+  }
+
+  if (showManual) {
+    return (
+      <PendingInstrumentForm
+        initialValues={pendingInitial}
+        allowSkip={existingPendingId != null}
+        onConfirm={handleManualConfirm}
+        onCancel={() => { setShowManual(false); setPendingInitial(undefined); setExistingPendingId(undefined); }}
+      />
     );
   }
 
@@ -104,30 +182,38 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
       {open && (
         <div className="absolute z-50 top-full mt-1 w-full bg-popover border rounded-md shadow-md overflow-hidden">
           <div className="max-h-60 overflow-y-auto">
-            {results.map((r) => (
-              <button
-                key={r.instrument_id}
-                className="w-full text-left px-3 py-2.5 hover:bg-accent transition-colors"
-                onClick={() => select(r)}
-              >
-                <div className="text-sm font-medium">{r.name}</div>
-                <div className="text-xs text-muted-foreground">
-                  {r.isin && <span className="mr-2">{r.isin}</span>}
-                  {r.nse_symbol && <span className="mr-2 font-mono">{r.nse_symbol}</span>}
-                  <span className={cn(
-                    "px-1.5 py-0.5 rounded text-xs",
-                    r.asset_class === "EQUITY" && "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-                    r.asset_class === "MF" && "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
-                    r.asset_class === "FIXED_INCOME" && "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                  )}>{r.asset_class}</span>
-                </div>
-              </button>
-            ))}
+            {results.map((r) => {
+              const isPending = r.pending_instrument_id != null;
+              return (
+                <button
+                  key={r.instrument_id}
+                  className="w-full text-left px-3 py-2.5 hover:bg-accent transition-colors"
+                  onClick={() => isPending ? selectExistingPending(r) : selectResolved(r)}
+                >
+                  <div className="text-sm font-medium">{r.name}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {r.isin && <span className="mr-2">{r.isin}</span>}
+                    {r.nse_symbol && <span className="mr-2 font-mono">{r.nse_symbol}</span>}
+                    <span className={cn(
+                      "px-1.5 py-0.5 rounded text-xs",
+                      isPending
+                        ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
+                        : r.asset_class === "EQUITY"       ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                        : r.asset_class === "MF"           ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400"
+                        : r.asset_class === "FIXED_INCOME" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                        : ""
+                    )}>
+                      {isPending ? "PENDING" : r.asset_class}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
           <div className="border-t px-3 py-2">
             <button
               className="text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => { setOpen(false); /* TODO: open create instrument dialog */ }}
+              onClick={() => { setOpen(false); setPendingInitial(undefined); setExistingPendingId(undefined); setShowManual(true); }}
             >
               + Not found? Add manually
             </button>

@@ -1,8 +1,12 @@
 pub mod angel_one;
 pub mod cams_cas;
-pub mod choice_equity;
+pub mod ce_global;
 pub mod choice_mf;
-pub mod icici_equity;
+pub mod cn_choice_equity;
+pub mod cn_nirmal_bang;
+pub mod cn_woodstock;
+pub mod common;
+pub mod icici_equity_2;
 pub mod pdf_utils;
 
 use crate::db;
@@ -21,8 +25,11 @@ pub fn get_import_sources() -> Vec<ImportSource> {
         ImportSource { value: "ANGELONE",      label: "Angel One — Trades & Charges",        description: ".xlsx from Angel One back-office"              },
         ImportSource { value: "CAMS_CAS",      label: "CAMS — Consolidated Account Statement", description: ".pdf CAS from mycams.com (all AMCs)"         },
         ImportSource { value: "CHOICE_MF",     label: "Choice Wealth — MF Statement",        description: ".pdf from Choice Wealth MF portal"             },
-        ImportSource { value: "CHOICE_EQUITY", label: "Choice Equity — Global Details", description: ".pdf Global Details Report from Choice Equity"   },
-        ImportSource { value: "ICICI_EQUITY",  label: "ICICI Securities — Equity TRX",  description: ".pdf TRX-Equity statement from ICICI Securities"  },
+        ImportSource { value: "CE_GLOBAL",     label: "Choice Equity Global",           description: ".pdf Global Details Report from Choice Equity"   },
+        ImportSource { value: "ICICI_EQUITY",      label: "ICICI Securities — Equity TRX",    description: ".pdf TRX-Equity statement from ICICI Securities"  },
+        ImportSource { value: "CN_CHOICE_EQUITY", label: "Choice Equity — Contract Note",    description: ".pdf Contract Note from Choice Equity Broking"      },
+        ImportSource { value: "CN_WOODSTOCK",    label: "Woodstock Broking — Contract Note", description: ".pdf Contract Note from Woodstock Broking"            },
+        ImportSource { value: "CN_NIRMAL_BANG",  label: "Nirmal Bang — Contract Note",       description: ".pdf Contract Note from Nirmal Bang Securities"      },
     ]
 }
 
@@ -40,56 +47,91 @@ pub fn flag_oversells(account_id: i64) -> Result<(), String> {
     // Load all non-flagged delivery-relevant transactions for this account,
     // ordered to match the FIFO engine in holdings.rs.
     let mut stmt = conn.prepare(
-        "SELECT t.txn_id, t.instrument_id, t.trade_date, t.txn_type, t.trade_segment, t.quantity
+        "SELECT t.txn_id,
+                COALESCE(t.instrument_id, -t.pending_instrument_id) AS instrument_id,
+                t.trade_date, t.txn_type, t.quantity
          FROM transactions t
          WHERE t.account_id = ?1
            AND t.txn_type IN (
-               'BUY','SIP','OPENING_BALANCE','BONUS','MERGER_IN','SWITCH_IN','TRANSFER_IN',
-               'SELL','REDEMPTION','MERGER_OUT','SWITCH_OUT','TRANSFER_OUT'
+               'BUY','SIP','IPO','FPO','OPENING_BALANCE','BONUS','MERGER_IN','SWITCH_IN','TRANSFER_IN','SPLIT_IN',
+               'SELL','REDEMPTION','MERGER_OUT','SWITCH_OUT','TRANSFER_OUT','SPLIT_OUT'
            )
            AND (t.flag IS NULL OR t.flag = 'OVERSELL')
-         ORDER BY t.instrument_id, t.trade_date ASC, t.txn_id ASC",
+         ORDER BY COALESCE(t.instrument_id, -t.pending_instrument_id), t.trade_date ASC, t.txn_id ASC",
     ).map_err(|e| e.to_string())?;
 
-    struct Row { txn_id: i64, instrument_id: i64, txn_type: String, quantity: f64 }
+    struct Row { txn_id: i64, instrument_id: i64, trade_date: String, txn_type: String, quantity: f64 }
 
     let rows: Vec<Row> = stmt.query_map([account_id], |row| Ok(Row {
         txn_id:        row.get(0)?,
         instrument_id: row.get(1)?,
+        trade_date:    row.get(2)?,
         txn_type:      row.get(3)?,
-        quantity:      row.get(5)?,
+        quantity:      row.get(4)?,
     }))
     .map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| e.to_string())?;
 
-    // FIFO per instrument — track running quantity
-    let mut qty_map: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
-    let mut to_flag:  Vec<(i64, String)> = Vec::new(); // (txn_id, reason)
-    let mut to_clear: Vec<i64>           = Vec::new(); // txn_ids to un-flag
+    // Group by (instrument_id, trade_date) to compute daily net quantities.
+    struct DayGroup {
+        buy_qty:  f64,
+        sell_qty: f64,
+        all_ids:  Vec<i64>,
+        sell_ids: Vec<i64>,
+    }
+    let mut day_map: std::collections::HashMap<(i64, String), DayGroup> =
+        std::collections::HashMap::new();
 
     for row in &rows {
-        let qty = qty_map.entry(row.instrument_id).or_insert(0.0);
-
         let is_sell = matches!(
             row.txn_type.as_str(),
-            "SELL" | "REDEMPTION" | "MERGER_OUT" | "SWITCH_OUT" | "TRANSFER_OUT"
+            "SELL" | "REDEMPTION" | "MERGER_OUT" | "SWITCH_OUT" | "TRANSFER_OUT" | "SPLIT_OUT"
         );
-
+        let g = day_map
+            .entry((row.instrument_id, row.trade_date.clone()))
+            .or_insert(DayGroup { buy_qty: 0.0, sell_qty: 0.0, all_ids: vec![], sell_ids: vec![] });
+        g.all_ids.push(row.txn_id);
         if is_sell {
-            if row.quantity > *qty + 0.0001 {
+            g.sell_qty += row.quantity;
+            g.sell_ids.push(row.txn_id);
+        } else {
+            g.buy_qty += row.quantity;
+        }
+    }
+
+    // Process groups in (instrument_id, trade_date) order — same as holdings FIFO.
+    let mut sorted: Vec<_> = day_map.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.0.1.cmp(&b.0.1)));
+
+    let mut qty_map: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    let mut to_flag:  Vec<(i64, String)> = Vec::new();
+    let mut to_clear: Vec<i64>           = Vec::new();
+
+    for ((instrument_id, _), g) in sorted {
+        let avail       = qty_map.entry(instrument_id).or_insert(0.0);
+        let total_avail = *avail + g.buy_qty;
+
+        if g.sell_qty > total_avail + 0.0001 {
+            // Day's sells exceed what was available (prior position + today's buys).
+            for txn_id in &g.sell_ids {
                 to_flag.push((
-                    row.txn_id,
-                    format!("Sell qty {:.4} exceeds available {:.4}", row.quantity, qty),
+                    *txn_id,
+                    format!("Day sells {:.4} exceed available {:.4}", g.sell_qty, total_avail),
                 ));
-                // Don't reduce below zero — the oversell txn is excluded from portfolio
-            } else {
-                *qty -= row.quantity;
-                to_clear.push(row.txn_id);
+            }
+            // Buys on this day still add to position; oversold sells are excluded.
+            *avail += g.buy_qty;
+            let sell_set: std::collections::HashSet<i64> =
+                g.sell_ids.iter().copied().collect();
+            for txn_id in &g.all_ids {
+                if !sell_set.contains(txn_id) {
+                    to_clear.push(*txn_id);
+                }
             }
         } else {
-            *qty += row.quantity;
-            to_clear.push(row.txn_id);
+            *avail = total_avail - g.sell_qty;
+            to_clear.extend(&g.all_ids);
         }
     }
 

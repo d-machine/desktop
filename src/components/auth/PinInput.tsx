@@ -4,11 +4,12 @@ import { cn } from "@/lib/utils";
 interface PinInputProps {
   length?: number;
   onChange: (pin: string) => void;
+  onComplete?: (pin: string) => void;
   disabled?: boolean;
   error?: boolean;
 }
 
-export function PinInput({ length = 6, onChange, disabled, error }: PinInputProps) {
+export function PinInput({ length = 6, onChange, onComplete, disabled, error }: PinInputProps) {
   const [digits, setDigits] = useState<string[]>(Array(length).fill(""));
   const inputs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -17,9 +18,12 @@ export function PinInput({ length = 6, onChange, disabled, error }: PinInputProp
     const next = [...digits];
     next[index] = value.slice(-1); // only last character
     setDigits(next);
-    onChange(next.join(""));
+    const pin = next.join("");
+    onChange(pin);
     if (value && index < length - 1) {
       inputs.current[index + 1]?.focus();
+    } else if (value && index === length - 1 && next.every(d => d !== "")) {
+      onComplete?.(pin);
     }
   };
 
@@ -35,8 +39,12 @@ export function PinInput({ length = 6, onChange, disabled, error }: PinInputProp
     const next = [...digits];
     pasted.split("").forEach((ch, i) => { next[i] = ch; });
     setDigits(next);
-    onChange(next.join(""));
+    const pin = next.join("");
+    onChange(pin);
     inputs.current[Math.min(pasted.length, length - 1)]?.focus();
+    if (pasted.length === length) {
+      onComplete?.(pin);
+    }
   };
 
   return (

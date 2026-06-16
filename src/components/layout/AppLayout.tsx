@@ -6,11 +6,11 @@ import { type Page } from "@/lib/nav";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { HoldingsPage } from "@/pages/HoldingsPage";
 import { TransactionsPage } from "@/pages/TransactionsPage";
-import { CapitalGainsPage } from "@/pages/CapitalGainsPage";
 import { IncomePage } from "@/pages/IncomePage";
 import { AssetAllocationPage } from "@/pages/AssetAllocationPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { TaxPage } from "@/pages/TaxPage";
 
 interface AppLayoutProps {
   onLock: () => void;
@@ -29,10 +29,10 @@ function PageContent({
     case "dashboard":        return <DashboardPage onNavigate={onNavigate} />;
     case "holdings":         return <HoldingsPage initialInstrumentId={instrumentId} />;
     case "transactions":     return <TransactionsPage />;
-    case "capital-gains":    return <CapitalGainsPage />;
     case "income":           return <IncomePage />;
     case "asset-allocation": return <AssetAllocationPage />;
     case "reports":          return <ReportsPage />;
+    case "tax":              return <TaxPage />;
     case "settings":         return <SettingsPage />;
   }
 }

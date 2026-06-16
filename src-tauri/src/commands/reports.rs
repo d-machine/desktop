@@ -62,7 +62,6 @@ struct TxnRow {
     tax_category: String,
     trade_date: String,
     txn_type: String,
-    trade_segment: String,
     quantity: f64,
     total_value_paise: i64,
     price_paise: i64,
@@ -135,20 +134,56 @@ pub fn get_capital_gains(
         _ => String::new(),
     };
 
+    // For pending instruments we derive asset_class / tax_category from pi.type.
+    // EQUITY/INDEX → EQUITY_LTCG; MF variants → EQUITY_LTCG (conservative);
+    // FNO variants → NON_SPECULATIVE; MCX → NON_SPECULATIVE.
     let sql = format!(
-        "SELECT t.account_id, a.name, t.instrument_id, i.name, i.isin,
-                it.asset_class, it.tax_category,
-                t.trade_date, t.txn_type, t.trade_segment,
+        "SELECT t.account_id,
+                a.name,
+                COALESCE(t.instrument_id, -t.pending_instrument_id) AS instrument_id,
+                COALESCE(i.name, pi.name)                           AS instrument_name,
+                COALESCE(ie.isin, json_extract(pi.metadata, '$.isin')) AS isin,
+                COALESCE(it.asset_class,
+                    CASE pi.type
+                        WHEN 'EQUITY'  THEN 'EQUITY'
+                        WHEN 'MF'      THEN 'MF'
+                        WHEN 'FUTSTK'  THEN 'DERIVATIVE'
+                        WHEN 'FUTIDX'  THEN 'DERIVATIVE'
+                        WHEN 'OPTSTK'  THEN 'DERIVATIVE'
+                        WHEN 'OPTIDX'  THEN 'DERIVATIVE'
+                        WHEN 'MCX'     THEN 'COMMODITY'
+                        ELSE 'EQUITY'
+                    END
+                ) AS asset_class,
+                COALESCE(it.tax_category,
+                    CASE pi.type
+                        WHEN 'EQUITY'  THEN 'EQUITY_LTCG'
+                        WHEN 'MF'      THEN 'EQUITY_LTCG'
+                        WHEN 'FUTSTK'  THEN 'NON_SPECULATIVE'
+                        WHEN 'FUTIDX'  THEN 'NON_SPECULATIVE'
+                        WHEN 'OPTSTK'  THEN 'NON_SPECULATIVE'
+                        WHEN 'OPTIDX'  THEN 'NON_SPECULATIVE'
+                        WHEN 'MCX'     THEN 'NON_SPECULATIVE'
+                        ELSE 'EQUITY_LTCG'
+                    END
+                ) AS tax_category,
+                t.trade_date, t.txn_type,
                 t.quantity, t.total_value_paise, t.price_paise
          FROM transactions t
          JOIN accounts a ON t.account_id = a.account_id
-         JOIN instruments i ON t.instrument_id = i.instrument_id
-         JOIN instrument_types it ON i.instrument_type_id = it.instrument_type_id
+         LEFT JOIN instruments i ON i.instrument_id = t.instrument_id
+         LEFT JOIN instrument_types it ON it.instrument_type_id = i.instrument_type_id
+         LEFT JOIN instrument_equity ie ON ie.instrument_id = i.instrument_id
+         LEFT JOIN pending_instruments pi ON pi.pending_id = t.pending_instrument_id
          WHERE t.txn_type IN (
-             'BUY','SIP','OPENING_BALANCE','BONUS','MERGER_IN','SWITCH_IN',
-             'SELL','REDEMPTION','MERGER_OUT','SWITCH_OUT'
-         ) {acct_sql}
-         ORDER BY t.account_id, t.instrument_id, t.trade_date ASC, t.txn_id ASC"
+             'BUY','SIP','IPO','FPO','OPENING_BALANCE','BONUS',
+             'MERGER_IN','SWITCH_IN','TRANSFER_IN','SPLIT_IN',
+             'SELL','REDEMPTION','MERGER_OUT','SWITCH_OUT','TRANSFER_OUT','SPLIT_OUT'
+         )
+         {acct_sql}
+         ORDER BY t.account_id,
+                  COALESCE(t.instrument_id, -t.pending_instrument_id),
+                  t.trade_date ASC, t.txn_id ASC"
     );
 
     let acct_params: Vec<Box<dyn rusqlite::ToSql>> = match &account_ids {
@@ -169,27 +204,138 @@ pub fn get_capital_gains(
             tax_category: row.get(6)?,
             trade_date: row.get(7)?,
             txn_type: row.get(8)?,
-            trade_segment: row.get(9)?,
-            quantity: row.get(10)?,
-            total_value_paise: row.get(11)?,
-            price_paise: row.get(12)?,
+            quantity: row.get(9)?,
+            total_value_paise: row.get(10)?,
+            price_paise: row.get(11)?,
         }),
     )
     .map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| e.to_string())?;
 
-    // FIFO matching: key = (account_id, instrument_id)
-    let mut buy_queues: HashMap<(i64, i64), Vec<BuyLot>> = HashMap::new();
+    // Cost-basis transfers (SPLIT, TRANSFER) are not taxable events.
+    // They drain/seed the FIFO queue but don't produce capital gain lots.
+    let is_buy = |t: &str| matches!(
+        t, "BUY" | "SIP" | "IPO" | "FPO" | "OPENING_BALANCE" | "BONUS"
+         | "MERGER_IN" | "SWITCH_IN" | "TRANSFER_IN" | "SPLIT_IN"
+    );
+    let is_taxable_sell = |t: &str| matches!(
+        t, "SELL" | "REDEMPTION" | "MERGER_OUT" | "SWITCH_OUT"
+    );
+    let is_silent_sell = |t: &str| matches!(t, "TRANSFER_OUT" | "SPLIT_OUT");
+
+    // Tradeable types eligible for same-day netting across all asset classes.
+    // Corporate actions (BONUS, SPLIT, MERGER, TRANSFER, OPENING_BALANCE) are not
+    // intraday trades and are excluded — they go straight into the FIFO.
+    let is_trading_buy  = |t: &str| matches!(t, "BUY" | "IPO" | "FPO" | "SIP");
+    let is_trading_sell = |t: &str| matches!(t, "SELL" | "REDEMPTION");
+
+    // Same-day gain type by asset class:
+    //   Equity intraday → SPECULATIVE (Section 43(5))
+    //   F&O / MCX intraday → NON_SPECULATIVE (F&O is always non-speculative)
+    //   MF same-day → STCG (holding period = 0, rate follows short-term rules)
+    let same_day_gain_type = |asset_class: &str, tax_category: &str| -> &'static str {
+        match (asset_class, tax_category) {
+            ("EQUITY", _) => "SPECULATIVE",
+            (_, "NON_SPECULATIVE") => "NON_SPECULATIVE",
+            _ => "STCG",
+        }
+    };
+
+    // ── Phase 1: Day-level totals for same-day netting (all asset classes) ───
+    // key = (account_id, instrument_id, trade_date)
+    struct DayTotals {
+        buy_qty: f64, buy_value_paise: f64,
+        sell_qty: f64, sell_value_paise: f64,
+        instrument_id: i64,
+        asset_class: String,
+        account_name: String, instrument_name: String,
+        isin: Option<String>, tax_category: String,
+    }
+    let mut day_map: HashMap<(i64, i64, String), DayTotals> = HashMap::new();
+
+    for row in &rows {
+        if !is_trading_buy(&row.txn_type) && !is_trading_sell(&row.txn_type) { continue; }
+
+        let key = (row.account_id, row.instrument_id, row.trade_date.clone());
+        let entry = day_map.entry(key).or_insert_with(|| DayTotals {
+            buy_qty: 0.0, buy_value_paise: 0.0,
+            sell_qty: 0.0, sell_value_paise: 0.0,
+            instrument_id: row.instrument_id,
+            asset_class: row.asset_class.clone(),
+            account_name: row.account_name.clone(),
+            instrument_name: row.instrument_name.clone(),
+            isin: row.isin.clone(), tax_category: row.tax_category.clone(),
+        });
+
+        if is_trading_buy(&row.txn_type) {
+            entry.buy_qty          += row.quantity;
+            entry.buy_value_paise  += row.total_value_paise.unsigned_abs() as f64;
+        } else {
+            entry.sell_qty         += row.quantity;
+            entry.sell_value_paise += row.total_value_paise.unsigned_abs() as f64;
+        }
+    }
+
     let mut lots: Vec<CapitalGainLot> = Vec::new();
 
-    let is_buy = |t: &str| matches!(t, "BUY" | "SIP" | "OPENING_BALANCE" | "BONUS" | "MERGER_IN" | "SWITCH_IN");
-    let is_sell = |t: &str| matches!(t, "SELL" | "REDEMPTION" | "MERGER_OUT" | "SWITCH_OUT");
+    // ── Phase 2: Same-day matched lots ───────────────────────────────────────
+    let mut day_keys: Vec<(i64, i64, String)> = day_map.keys().cloned().collect();
+    day_keys.sort();
+
+    for key in &day_keys {
+        let t = &day_map[key];
+        let matched_qty = t.buy_qty.min(t.sell_qty);
+        if matched_qty < 0.0001 { continue; }
+
+        let avg_buy  = t.buy_value_paise  / t.buy_qty;
+        let avg_sell = t.sell_value_paise / t.sell_qty;
+        let cost     = (avg_buy  * matched_qty) as i64;
+        let proceeds = (avg_sell * matched_qty) as i64;
+        let gt       = same_day_gain_type(&t.asset_class, &t.tax_category).to_string();
+
+        lots.push(CapitalGainLot {
+            instrument_id: t.instrument_id, instrument_name: t.instrument_name.clone(),
+            isin: t.isin.clone(), asset_class: t.asset_class.clone(),
+            tax_category: t.tax_category.clone(), account_name: t.account_name.clone(),
+            buy_date: key.2.clone(), sell_date: key.2.clone(),
+            quantity: matched_qty,
+            buy_price_paise: avg_buy as i64, sell_price_paise: avg_sell as i64,
+            cost_paise: cost, proceeds_paise: proceeds, gain_paise: proceeds - cost,
+            holding_days: 0, gain_type: gt, fy: fy_of(&key.2),
+        });
+    }
+
+    // ── Phase 3: Delivery FIFO on net quantities ──────────────────────────────
+    // Each day's same-day matched budget is pre-computed in Phase 1.
+    // As rows are processed, the matched portion is absorbed first;
+    // only the residual delivery quantity enters the FIFO queue.
+    struct IntraBudget { buy_rem: f64, sell_rem: f64 }
+    let mut intra: HashMap<(i64, i64, String), IntraBudget> = HashMap::new();
+    for key in &day_keys {
+        let matched_qty = { let t = &day_map[key]; t.buy_qty.min(t.sell_qty) };
+        if matched_qty > 0.0001 {
+            intra.insert(key.clone(), IntraBudget { buy_rem: matched_qty, sell_rem: matched_qty });
+        }
+    }
+
+    let mut buy_queues: HashMap<(i64, i64), Vec<BuyLot>> = HashMap::new();
 
     for row in &rows {
         let key = (row.account_id, row.instrument_id);
 
-        if is_buy(row.txn_type.as_str()) {
+        if is_buy(&row.txn_type) {
+            let delivery_qty = if is_trading_buy(&row.txn_type) {
+                let bkey = (row.account_id, row.instrument_id, row.trade_date.clone());
+                let used = intra.get_mut(&bkey)
+                    .map(|b| { let d = row.quantity.min(b.buy_rem); b.buy_rem -= d; d })
+                    .unwrap_or(0.0);
+                row.quantity - used
+            } else {
+                row.quantity
+            };
+            if delivery_qty < 0.0001 { continue; }
+
             let cost_per_unit = if row.quantity > 0.0 {
                 (row.total_value_paise.unsigned_abs() as f64 / row.quantity) as i64
             } else {
@@ -198,17 +344,31 @@ pub fn get_capital_gains(
             buy_queues.entry(key).or_default().push(BuyLot {
                 trade_date: row.trade_date.clone(),
                 cost_per_unit_paise: cost_per_unit,
-                remaining_qty: row.quantity,
+                remaining_qty: delivery_qty,
             });
-        } else if is_sell(row.txn_type.as_str()) {
+
+        } else if is_taxable_sell(&row.txn_type) || is_silent_sell(&row.txn_type) {
+            let taxable = is_taxable_sell(&row.txn_type);
+
+            let delivery_qty = if is_trading_sell(&row.txn_type) {
+                let bkey = (row.account_id, row.instrument_id, row.trade_date.clone());
+                let used = intra.get_mut(&bkey)
+                    .map(|b| { let d = row.quantity.min(b.sell_rem); b.sell_rem -= d; d })
+                    .unwrap_or(0.0);
+                row.quantity - used
+            } else {
+                row.quantity
+            };
+            if delivery_qty < 0.0001 { continue; }
+
             let sell_proceeds_per_unit = if row.quantity > 0.0 {
-                (row.total_value_paise as f64 / row.quantity) as i64
+                (row.total_value_paise.unsigned_abs() as f64 / row.quantity) as i64
             } else {
                 row.price_paise
             };
 
             let queue = buy_queues.entry(key).or_default();
-            let mut qty_to_match = row.quantity;
+            let mut qty_to_match = delivery_qty;
 
             for lot in queue.iter_mut() {
                 if qty_to_match <= 0.0001 { break; }
@@ -218,29 +378,22 @@ pub fn get_capital_gains(
                 lot.remaining_qty -= matched;
                 qty_to_match -= matched;
 
-                let cost = (lot.cost_per_unit_paise as f64 * matched) as i64;
-                let proceeds = (sell_proceeds_per_unit as f64 * matched) as i64;
+                if !taxable { continue; }
+
+                let cost    = (lot.cost_per_unit_paise as f64 * matched) as i64;
+                let proceeds = (sell_proceeds_per_unit  as f64 * matched) as i64;
                 let days = holding_days(&lot.trade_date, &row.trade_date);
-                let gt = gain_type(&row.tax_category, &row.trade_segment, days);
+                let gt   = gain_type(&row.tax_category, "DELIVERY", days);
 
                 lots.push(CapitalGainLot {
-                    instrument_id: row.instrument_id,
-                    instrument_name: row.instrument_name.clone(),
-                    isin: row.isin.clone(),
-                    asset_class: row.asset_class.clone(),
-                    tax_category: row.tax_category.clone(),
-                    account_name: row.account_name.clone(),
-                    buy_date: lot.trade_date.clone(),
-                    sell_date: row.trade_date.clone(),
+                    instrument_id: row.instrument_id, instrument_name: row.instrument_name.clone(),
+                    isin: row.isin.clone(), asset_class: row.asset_class.clone(),
+                    tax_category: row.tax_category.clone(), account_name: row.account_name.clone(),
+                    buy_date: lot.trade_date.clone(), sell_date: row.trade_date.clone(),
                     quantity: matched,
-                    buy_price_paise: lot.cost_per_unit_paise,
-                    sell_price_paise: sell_proceeds_per_unit,
-                    cost_paise: cost,
-                    proceeds_paise: proceeds,
-                    gain_paise: proceeds - cost,
-                    holding_days: days,
-                    gain_type: gt,
-                    fy: fy_of(&row.trade_date),
+                    buy_price_paise: lot.cost_per_unit_paise, sell_price_paise: sell_proceeds_per_unit,
+                    cost_paise: cost, proceeds_paise: proceeds, gain_paise: proceeds - cost,
+                    holding_days: days, gain_type: gt, fy: fy_of(&row.trade_date),
                 });
             }
         }
@@ -362,13 +515,14 @@ pub fn get_income(
     };
 
     let sql = format!(
-        "SELECT t.txn_id, t.instrument_id, i.name, i.isin,
+        "SELECT t.txn_id, t.instrument_id, i.name, ie.isin,
                 it.asset_class, a.name AS account_name,
                 t.txn_type, t.trade_date, t.total_value_paise, t.notes
          FROM transactions t
          JOIN accounts a ON t.account_id = a.account_id
          JOIN instruments i ON t.instrument_id = i.instrument_id
          JOIN instrument_types it ON i.instrument_type_id = it.instrument_type_id
+         LEFT JOIN instrument_equity ie ON ie.instrument_id = i.instrument_id
          WHERE t.txn_type IN ('DIVIDEND', 'INTEREST') {acct_sql}
          ORDER BY t.trade_date DESC, t.txn_id DESC"
     );

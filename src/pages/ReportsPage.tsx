@@ -1,8 +1,43 @@
+import { useState } from "react";
+import { cn } from "@/lib/utils";
+import { CapitalGainsPage } from "@/pages/CapitalGainsPage";
+import { ChargesTab } from "@/components/reports/ChargesTab";
+
+type ReportTab = "capital-gains" | "charges";
+
+const TABS: { id: ReportTab; label: string }[] = [
+  { id: "capital-gains", label: "Capital Gains" },
+  { id: "charges",       label: "Charges" },
+];
+
 export function ReportsPage() {
+  const [tab, setTab] = useState<ReportTab>("capital-gains");
+
   return (
-    <div className="space-y-1">
-      <h1 className="text-2xl font-semibold">Reports</h1>
-      <p className="text-muted-foreground text-sm">Export & custom reports — coming soon.</p>
+    <div className="flex flex-col gap-4 h-full">
+      {/* Tab bar */}
+      <div className="flex gap-1 border-b pb-0">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={cn(
+              "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+              tab === t.id
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      <div className="flex-1 min-h-0">
+        {tab === "capital-gains" && <CapitalGainsPage />}
+        {tab === "charges"       && <ChargesTab />}
+      </div>
     </div>
   );
 }

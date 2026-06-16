@@ -51,10 +51,6 @@ fn stt_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\*+\s*stt\s+paid\s*\*+.*?([\d,.]+)\s*$").unwrap())
 }
-fn number_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"-?[\d,]+\.\d+").unwrap())
-}
 fn paren_neg_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     // Matches parenthesised negatives like "(25,974.81)" → converts to "-25974.81"
@@ -151,11 +147,6 @@ fn is_non_financial(desc: &str) -> bool {
         || d.contains("DEREGISTR") || d.contains("CONSOLIDATION")
 }
 
-/// Extract all floating-point numbers from a string.
-fn all_numbers(s: &str) -> Vec<f64> {
-    number_re().find_iter(s).map(|m| parse_f64(m.as_str())).collect()
-}
-
 /// Strip CAMS page-stamp appended at page breaks (e.g. "CAMSCASWS-210426… Version:V3.4 Live-1017").
 fn strip_page_stamp(s: &str) -> &str {
     if let Some(pos) = s.find("CAMSCASWS") {
@@ -242,6 +233,12 @@ fn strip_scheme_code_prefix(s: &str) -> String {
     clean.trim_end_matches(|c: char| c == '(' || c.is_whitespace()).to_string()
 }
 
+// ─── Extraction parameters ────────────────────────────────────────────────────
+
+const X_GAP:      f32 = 6.0;
+const CHAR_Y_TOL: f32 = 2.0;
+const ROW_Y_TOL:  f32 = 5.0;
+
 // ─── Column layout (PDF points) ──────────────────────────────────────────────
 
 /// Left edge of each column (index 0 = Date, 1 = Transaction, …).
@@ -260,8 +257,8 @@ const C_BAL:  usize = 5;
 // ─── Main entry points ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn parse_cams_cas_pdf(file_path: String) -> Result<CasPreview, String> {
-    parse_cas_spans(&file_path)
+pub fn parse_cams_cas_pdf(file_path: String, password: Option<String>) -> Result<CasPreview, String> {
+    parse_cas_spans(&file_path, password.as_deref())
 }
 
 // ─── Import result ────────────────────────────────────────────────────────────
@@ -301,7 +298,7 @@ pub struct CasImportInput {
 pub fn import_cams_cas(input: CasImportInput) -> Result<CasImportResult, String> {
     let conn = db::acquire()?;
 
-    let mf_type_id: i64 = conn
+    let _mf_type_id: i64 = conn
         .query_row(
             "SELECT instrument_type_id FROM instrument_types WHERE name='EQUITY_MF' LIMIT 1",
             [],
@@ -354,37 +351,30 @@ pub fn import_cams_cas(input: CasImportInput) -> Result<CasImportResult, String>
             .unwrap_or(0) == 0;
 
         // ── Find or create instrument by ISIN ─────────────────────────────────
-        let instrument_id: i64 = conn
+        let resolved_id: Option<i64> = conn
             .query_row(
-                "SELECT instrument_id FROM instruments WHERE isin=?1 LIMIT 1",
+                "SELECT instrument_id FROM instrument_equity WHERE isin=?1 LIMIT 1",
                 [&fund.isin],
                 |row| row.get(0),
             )
-            .ok()
-            .unwrap_or_else(|| {
-                let name = if !fund.scheme.is_empty() { fund.scheme.as_str() } else { &fund.isin };
+            .ok();
+
+        let (instrument_id, pending_instrument_id): (Option<i64>, Option<i64>) =
+            if let Some(id) = resolved_id {
+                (Some(id), None)
+            } else {
+                let name = if !fund.scheme.is_empty() { &fund.scheme } else { &fund.isin };
                 conn.execute(
-                    "INSERT OR IGNORE INTO instruments (isin, name, instrument_type_id, source)
-                     VALUES (?1, ?2, ?3, 'IMPORT')",
-                    rusqlite::params![fund.isin, name, mf_type_id],
+                    "INSERT INTO pending_instruments (instrument_type, name, isin)
+                     VALUES ('EQUITY_MF', ?1, ?2)",
+                    rusqlite::params![name, fund.isin],
                 )
                 .unwrap_or(0);
-                conn.query_row(
-                    "SELECT instrument_id FROM instruments WHERE isin=?1 LIMIT 1",
-                    [&fund.isin],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0)
-            });
+                total_auto_instr += 1;
+                (None, Some(conn.last_insert_rowid()))
+            };
 
-        let instrument_created = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transactions
-                 WHERE instrument_id=?1 AND account_id != ?2", [instrument_id, account_id],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(1) == 0;
-        if instrument_created { total_auto_instr += 1; }
+        let instrument_created = pending_instrument_id.is_some();
 
         // ── Import transactions ───────────────────────────────────────────────
         let mut imported = 0usize;
@@ -397,19 +387,20 @@ pub fn import_cams_cas(input: CasImportInput) -> Result<CasImportResult, String>
 
             let nav_paise = (txn.nav_rs * 100.0).round() as i64;
 
-            // Dedup: same account + instrument + date + nav + type
-            let exists: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM transactions
-                     WHERE account_id=?1 AND instrument_id=?2 AND trade_date=?3
-                       AND price_paise=?4 AND txn_type=?5",
-                    rusqlite::params![account_id, instrument_id, txn.date, nav_paise, txn.txn_type],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|c| c > 0)
-                .unwrap_or(false);
-
-            if exists { skipped += 1; continue; }
+            // Dedup only meaningful for resolved instruments (pending have no prior txns)
+            if let Some(iid) = instrument_id {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM transactions
+                         WHERE account_id=?1 AND instrument_id=?2 AND trade_date=?3
+                           AND price_paise=?4 AND txn_type=?5",
+                        rusqlite::params![account_id, iid, txn.date, nav_paise, txn.txn_type],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map(|c| c > 0)
+                    .unwrap_or(false);
+                if exists { skipped += 1; continue; }
+            }
 
             let units_for_db = match txn.txn_type.as_str() {
                 "REDEMPTION" | "SWITCH_OUT" => -txn.units.abs(),
@@ -424,12 +415,12 @@ pub fn import_cams_cas(input: CasImportInput) -> Result<CasImportResult, String>
 
             conn.execute(
                 "INSERT INTO transactions
-                    (account_id, instrument_id, txn_type, trade_segment, trade_date,
-                     quantity, price_paise, brokerage_paise, stt_paise, other_charges_paise,
-                     total_value_paise, notes)
-                 VALUES (?1,?2,?3,'MF',?4,?5,?6,?7,?8,0,?9,?10)",
+                    (account_id, instrument_id, pending_instrument_id, txn_type, trade_segment,
+                     trade_date, quantity, price_paise, brokerage_paise, stt_paise,
+                     other_charges_paise, total_value_paise, notes)
+                 VALUES (?1,?2,?3,?4,'MF',?5,?6,?7,?8,?9,0,?10,?11)",
                 rusqlite::params![
-                    account_id, instrument_id, txn.txn_type, txn.date,
+                    account_id, instrument_id, pending_instrument_id, txn.txn_type, txn.date,
                     units_for_db, nav_paise, stamp_paise, stt_paise,
                     total_value_paise,
                     if fund.folio.is_empty() { None } else { Some(format!("Folio: {}", fund.folio)) },
@@ -468,9 +459,9 @@ pub fn import_cams_cas(input: CasImportInput) -> Result<CasImportResult, String>
 
 // ─── Span-based parser ────────────────────────────────────────────────────────
 
-fn parse_cas_spans(file_path: &str) -> Result<CasPreview, String> {
+fn parse_cas_spans(file_path: &str, password: Option<&str>) -> Result<CasPreview, String> {
     let all_pages =
-        pdf_utils::extract_all_page_spans_with_boundaries(file_path, COL_BOUNDARIES)
+        pdf_utils::extract_all_page_spans_with_boundaries_pwd_cfg(file_path, password, COL_BOUNDARIES, X_GAP, CHAR_Y_TOL)
             .map_err(|e| format!("PDF span extraction failed: {e}"))?;
 
     let mut pan         = String::new();
@@ -486,7 +477,7 @@ fn parse_cas_spans(file_path: &str) -> Result<CasPreview, String> {
     let mut row_idx = 0usize;
 
     for page_spans in &all_pages {
-        let page_rows = pdf_utils::page_spans_to_rows(page_spans.clone(), 5.0);
+        let page_rows = pdf_utils::page_spans_to_rows(page_spans.clone(), ROW_Y_TOL);
 
         for row in page_rows {
             if row.is_empty() { continue; }
@@ -783,234 +774,6 @@ enum State {
     /// Actively parsing transactions; second field is the running unit balance
     FundBody(CasFundPreview, f64),
 }
-
-fn parse_cas_text(text: &str) -> Result<CasPreview, String> {
-    let lines: Vec<&str> = text.lines().collect();
-
-    let mut pan         = String::new();
-    let mut period_from = String::new();
-    let mut period_to   = String::new();
-
-    // Pre-scan first 60 lines for investor-level fields
-    for raw in lines.iter().take(60) {
-        let line = raw.trim();
-        if line.is_empty() { continue; }
-        if let Some(cap) = pan_re().captures(line) {
-            if pan.is_empty() { pan = cap[1].to_string(); }
-        }
-        if let Some(cap) = period_re().captures(line) {
-            if period_from.is_empty() {
-                period_from = parse_cas_date(&cap[1]);
-                period_to   = parse_cas_date(&cap[2]);
-            }
-        }
-    }
-
-    let mut funds: Vec<CasFundPreview> = Vec::new();
-    let mut state  = State::Before;
-    // Rolling buffer of recent non-noise lines for AMC name lookahead
-    let mut recent: Vec<String> = Vec::new();
-    // Pending partial transaction when description wraps to the next line
-    let mut pending: Option<(String, String)> = None; // (date, description_so_far)
-
-    for raw in &lines {
-        let line = raw.trim();
-        if line.is_empty() { continue; }
-
-        // ── Closing Unit Balance → commit current fund ────────────────────────
-        if let Some(cap) = closing_re().captures(line) {
-            let closing = parse_f64(&cap[1]);
-            pending = None;
-            match state {
-                State::FundHeader(mut f) => {
-                    f.closing_balance = closing;
-                    funds.push(f);
-                    state = State::Before;
-                    recent.clear();
-                }
-                State::FundBody(mut f, _) => {
-                    f.closing_balance = closing;
-                    funds.push(f);
-                    state = State::Before;
-                    recent.clear();
-                }
-                State::Before => {}
-            }
-            continue;
-        }
-
-        // ── ISIN line → start new fund ────────────────────────────────────────
-        // Primary: "ISIN: INFxxx" label; fallback: bare ISIN on a line that
-        // also has a dash (scheme-code separator), filtering out transaction lines.
-        let isin_on_line = isin_re().captures(line)
-            .map(|c| c[1].to_string())
-            .or_else(|| {
-                if line.contains('-') && !date_re().is_match(line) {
-                    bare_isin_re().captures(line).map(|c| c[1].to_string())
-                } else {
-                    None
-                }
-            });
-        if let Some(isin) = isin_on_line {
-            match state {
-                State::FundBody(f, _) | State::FundHeader(f) => funds.push(f),
-                State::Before => {}
-            }
-            pending = None;
-
-            let scheme = scheme_from_isin_line(line);
-
-            let amc = recent.iter().rev()
-                .find(|l| !is_pan_kyc_line(l) && !is_noise_line(l) && l.len() > 2)
-                .cloned()
-                .unwrap_or_default();
-
-            state = State::FundHeader(CasFundPreview {
-                amc, scheme, isin,
-                folio: String::new(), pan: String::new(),
-                opening_balance: 0.0, closing_balance: 0.0, transactions: Vec::new(),
-            });
-            recent.clear();
-            continue;
-        }
-
-        // ── Inside fund header ────────────────────────────────────────────────
-        if let State::FundHeader(ref mut fund) = state {
-            if let Some(cap) = folio_re().captures(line) {
-                if fund.folio.is_empty() {
-                    fund.folio = cap[1].trim_end_matches(|c: char| !c.is_alphanumeric()).to_string();
-                }
-            }
-            if let Some(cap) = opening_re().captures(line) {
-                fund.opening_balance = parse_f64(&cap[1]);
-                let f = match std::mem::replace(&mut state, State::Before) {
-                    State::FundHeader(f) => f,
-                    other => { state = other; continue; }
-                };
-                let opening = f.opening_balance;
-                state = State::FundBody(f, opening);
-            }
-            continue;
-        }
-
-        // ── Inside fund body ──────────────────────────────────────────────────
-        if let State::FundBody(ref mut fund, ref mut prev_bal) = state {
-            // Stamp duty / STT — attach to last transaction
-            if let Some(cap) = stamp_duty_re().captures(line) {
-                if let Some(t) = fund.transactions.last_mut() {
-                    t.stamp_duty_rs = parse_f64(&cap[1]);
-                }
-                pending = None;
-                continue;
-            }
-            if let Some(cap) = stt_re().captures(line) {
-                if let Some(t) = fund.transactions.last_mut() {
-                    t.stt_rs = parse_f64(&cap[1]);
-                }
-                pending = None;
-                continue;
-            }
-
-            // Transaction row starts with DD-Mon-YYYY
-            if let Some(cap) = date_re().captures(line) {
-                let raw_date = cap[1].to_string();
-                let rest     = cap[2].trim().to_string();
-
-                if is_non_financial(&rest) { pending = None; continue; }
-                if rest.contains("Stamp Duty") || rest.contains("STT Paid") { continue; }
-
-                // Strip CAMS page-stamp appended at page breaks, then normalise parens
-                let rest_clean = strip_page_stamp(&rest).to_string();
-                let rest_n = normalise_signs(&rest_clean);
-                let matches: Vec<_> = number_re().find_iter(&rest_n).collect();
-
-                if matches.len() >= 2 {
-                    pending = None;
-                    let n = matches.len();
-
-                    let amount  = parse_f64(matches[0].as_str());
-                    let balance = parse_f64(matches[n - 1].as_str());
-
-                    // Units derived from running balance delta — avoids merged-column ambiguity
-                    let units = balance - *prev_bal;
-                    // NAV computed: |amount| / |units|
-                    let nav = if units.abs() > 0.000_01 { amount.abs() / units.abs() } else { 0.0 };
-
-                    if amount == 0.0 && units.abs() < 0.000_01 { continue; }
-
-                    // Description: from first alphabetic char after amount to start of balance
-                    let first_num_end = matches[0].end();
-                    let desc_start = rest_n[first_num_end..]
-                        .find(|c: char| c.is_alphabetic())
-                        .map(|i| first_num_end + i)
-                        .unwrap_or(first_num_end);
-                    let desc_end = matches[n - 1].start();
-                    let desc = if desc_end > desc_start {
-                        rest_n[desc_start..desc_end].trim().to_string()
-                    } else {
-                        rest.clone()
-                    };
-
-                    *prev_bal = balance;
-                    fund.transactions.push(CasTransaction {
-                        date:          parse_cas_date(&raw_date),
-                        txn_type:      classify_txn(&desc).to_string(),
-                        description:   desc,
-                        amount_rs:     amount,
-                        units,
-                        nav_rs:        nav,
-                        unit_balance:  balance,
-                        stamp_duty_rs: 0.0,
-                        stt_rs:        0.0,
-                    });
-                } else {
-                    // Only 0 or 1 number — description or date-only row; skip or pend
-                    pending = Some((raw_date, rest));
-                }
-                continue;
-            }
-
-            // No-date line — could be column header or footnote; skip
-            {
-                let lc = line.to_lowercase();
-                if lc.contains("transaction") && (lc.contains("amount") || lc.contains("nav")) {
-                    pending = None;
-                    continue;
-                }
-            }
-            // Continuation of a multi-line description (no new numeric data expected here)
-            if let Some((date, desc)) = pending.take() {
-                let combined = format!("{} {}", desc, line.trim());
-                pending = Some((date, combined));
-            }
-            continue;
-        }
-
-        // ── Before any fund section — buffer for AMC lookahead ───────────────
-        if !is_noise_line(line) && line.len() > 2 {
-            recent.push(line.to_string());
-            if recent.len() > 12 { recent.remove(0); }
-        }
-    }
-
-    // Commit dangling fund (missing Closing Unit Balance)
-    match state {
-        State::FundBody(f, _) | State::FundHeader(f) => funds.push(f),
-        State::Before => {}
-    }
-
-    let total_transactions = funds.iter().map(|f| f.transactions.len()).sum();
-
-    Ok(CasPreview {
-        investor_name: String::new(),
-        pan,
-        period_from,
-        period_to,
-        funds,
-        total_transactions,
-    })
-}
-
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1022,7 +785,7 @@ mod tests {
             eprintln!("SKIP: file not found: {path}");
             return;
         }
-        let result = parse_cams_cas_pdf(path.to_string()).expect("parse failed");
+        let result = parse_cams_cas_pdf(path.to_string(), None).expect("parse failed");
         println!("File: {path}");
         println!("  PAN: {}  Period: {} → {}", result.pan, result.period_from, result.period_to);
         println!("  Funds: {}  Total transactions: {}", result.funds.len(), result.total_transactions);
@@ -1096,11 +859,11 @@ mod tests {
     fn test_span_rows() {
         let path = "/home/dmachine/Downloads/CAMS_Report.pdf";
         if !std::path::Path::new(path).exists() { return; }
-        let pages = pdf_utils::extract_all_page_spans_with_boundaries(path, COL_BOUNDARIES)
+        let pages = pdf_utils::extract_all_page_spans_with_boundaries_cfg(path, COL_BOUNDARIES, X_GAP, CHAR_Y_TOL)
             .expect("span extraction failed");
         let mut count = 0;
         'outer: for (pi, page) in pages.iter().enumerate() {
-            let rows = pdf_utils::page_spans_to_rows(page.clone(), 5.0);
+            let rows = pdf_utils::page_spans_to_rows(page.clone(), ROW_Y_TOL);
             for row in &rows {
                 let full: String = row.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
                 let full = strip_page_stamp(full.trim()).to_string();
@@ -1150,14 +913,14 @@ mod tests {
         // Use boundary-aware extraction so negative values like "(25,974.81)"
         // don't merge with the preceding column's text.
         let col_xs: Vec<f32> = COLS.iter().skip(1).map(|&(_, lo, _, _)| lo).collect();
-        let pages = pdf_utils::extract_all_page_spans_with_boundaries(pdf_path, &col_xs)
+        let pages = pdf_utils::extract_all_page_spans_with_boundaries_cfg(pdf_path, &col_xs, X_GAP, CHAR_Y_TOL)
             .expect("span extraction failed");
 
         // ── 1. Span-based reading-order reconstruction ────────────────────────
         let mut span_lines: Vec<String> = Vec::new();
         for (page_idx, spans) in pages.iter().enumerate() {
             span_lines.push(format!("=== Page {} ===", page_idx + 1));
-            let rows = pdf_utils::page_spans_to_rows(spans.clone(), 5.0);
+            let rows = pdf_utils::page_spans_to_rows(spans.clone(), ROW_Y_TOL);
             for row in &rows {
                 let mut line = String::new();
                 let mut prev_right = f32::NEG_INFINITY;
@@ -1222,7 +985,7 @@ mod tests {
             }
 
             // ── Spans coloured by column ──────────────────────────────────────
-            let rows = pdf_utils::page_spans_to_rows(spans.clone(), 5.0);
+            let rows = pdf_utils::page_spans_to_rows(spans.clone(), ROW_Y_TOL);
             for row in &rows {
                 for span in row {
                     let css_x = span.x * SCALE;
@@ -1292,6 +1055,157 @@ h2{{margin:0;padding:8px 12px;font-size:13px;background:#2d2d2d;color:#aaa}}
 "#);
 
         let out = "/tmp/cams_spans.html";
+        std::fs::write(out, &html).expect("write failed");
+        println!("Written: {out}  ({} pages, {} total spans, {} extract lines)",
+            pages.len(),
+            pages.iter().map(|p| p.len()).sum::<usize>(),
+            extract_lines.len());
+    }
+
+    /// Windows version of test_visualise_spans — same output, different paths.
+    #[test]
+    fn test_visualise_spans_win() {
+        let pdf_path = r"C:\Users\SUMIT\OneDrive\Desktop\transaction history\CAMS_Report.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            eprintln!("SKIP: {pdf_path} not found");
+            return;
+        }
+
+        let col_xs: Vec<f32> = COLS.iter().skip(1).map(|&(_, lo, _, _)| lo).collect();
+        let pages = pdf_utils::extract_all_page_spans_with_boundaries_cfg(pdf_path, &col_xs, X_GAP, CHAR_Y_TOL)
+            .expect("span extraction failed");
+
+        // ── 1. Span-based reading-order reconstruction ────────────────────────
+        let mut span_lines: Vec<String> = Vec::new();
+        for (page_idx, spans) in pages.iter().enumerate() {
+            span_lines.push(format!("=== Page {} ===", page_idx + 1));
+            let rows = pdf_utils::page_spans_to_rows(spans.clone(), ROW_Y_TOL);
+            for row in &rows {
+                let mut line = String::new();
+                let mut prev_right = f32::NEG_INFINITY;
+                for span in row {
+                    if prev_right > f32::NEG_INFINITY && span.x - prev_right > 4.0 {
+                        line.push(' ');
+                    }
+                    line.push_str(&span.text);
+                    prev_right = span.right;
+                }
+                if !line.trim().is_empty() {
+                    span_lines.push(line);
+                }
+            }
+        }
+
+        // ── 2. pdf_extract plain text ─────────────────────────────────────────
+        let extract_text = pdf_extract::extract_text(pdf_path)
+            .expect("extract_text failed");
+        let extract_lines: Vec<&str> = extract_text.lines().collect();
+
+        // ── 3. Positioned span map ────────────────────────────────────────────
+        const SCALE: f32 = 1.33;
+        let mut map_html = String::new();
+        for (page_idx, spans) in pages.iter().enumerate() {
+            if spans.is_empty() { continue; }
+            let max_y = spans.iter().map(|s| s.y).fold(f32::NEG_INFINITY, f32::max);
+            let max_x = spans.iter().map(|s| s.right).fold(f32::NEG_INFINITY, f32::max);
+            let page_h = (max_y + 40.0) * SCALE;
+            let page_w = (max_x + 20.0) * SCALE;
+
+            map_html.push_str(&format!(
+                "<div class='page' style='width:{page_w:.0}px;height:{page_h:.0}px'>\
+                 <div class='page-label'>Page {}</div>\n",
+                page_idx + 1
+            ));
+
+            for &(col_label, lo, hi, colour) in COLS {
+                let bx = lo * SCALE;
+                let bw = (hi.min(max_x + 20.0_f32) - lo).max(0.0) * SCALE;
+                map_html.push_str(&format!(
+                    "<div style='position:absolute;left:{bx:.0}px;top:0;\
+                     width:{bw:.0}px;height:{page_h:.0}px;\
+                     background:{colour};opacity:.4;pointer-events:none'></div>\n"
+                ));
+                map_html.push_str(&format!(
+                    "<div style='position:absolute;left:{bx:.0}px;top:4px;\
+                     font-size:7px;color:#555;font-weight:bold;z-index:2;\
+                     pointer-events:none'>{col_label}</div>\n"
+                ));
+                if lo > 0.0 {
+                    map_html.push_str(&format!(
+                        "<div style='position:absolute;left:{bx:.0}px;top:0;\
+                         width:1px;height:{page_h:.0}px;\
+                         background:rgba(0,0,0,.2);pointer-events:none;z-index:1'></div>\n"
+                    ));
+                }
+            }
+
+            let rows = pdf_utils::page_spans_to_rows(spans.clone(), ROW_Y_TOL);
+            for row in &rows {
+                for span in row {
+                    let css_x = span.x * SCALE;
+                    let css_y = (max_y - span.y) * SCALE;
+                    let span_w = (span.right - span.x + 4.0) * SCALE;
+                    let &(_, _, _, colour) = &COLS[col_for(span.x)];
+                    let txt = span.text
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    map_html.push_str(&format!(
+                        "<div class='sp' style='left:{css_x:.1}px;top:{css_y:.1}px;\
+                         width:{span_w:.0}px;background:{colour}'>{txt}</div>\n"
+                    ));
+                }
+            }
+            map_html.push_str("</div>\n");
+        }
+
+        fn numbered_pre(lines: &[impl AsRef<str>]) -> String {
+            let mut out = String::from("<pre class='code'>");
+            for (i, l) in lines.iter().enumerate() {
+                let l = l.as_ref()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                out.push_str(&format!("<span class='ln'>{:>4}</span> {l}\n", i + 1));
+            }
+            out.push_str("</pre>");
+            out
+        }
+
+        let span_pre    = numbered_pre(&span_lines);
+        let extract_pre = numbered_pre(&extract_lines);
+
+        let html = format!(r#"<!DOCTYPE html>
+<html><head><meta charset='utf-8'>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;background:#1e1e1e;font-family:monospace;color:#ccc}}
+h2{{margin:0;padding:8px 12px;font-size:13px;background:#2d2d2d;color:#aaa}}
+.panels{{display:flex;height:50vh;border-bottom:2px solid #444}}
+.panel{{flex:1;overflow:auto;border-right:1px solid #444}}
+.panel:last-child{{border-right:none}}
+.code{{margin:0;padding:8px;font-size:11px;line-height:1.5;white-space:pre}}
+.ln{{display:inline-block;width:3em;color:#555;user-select:none;
+     border-right:1px solid #333;margin-right:6px;text-align:right}}
+.map-wrap{{overflow:auto;padding:20px;background:#333}}
+.page{{position:relative;background:white;margin:20px auto;
+       box-shadow:0 4px 12px #0008}}
+.page-label{{position:absolute;top:2px;left:4px;font-size:9px;color:#888}}
+.sp{{position:absolute;white-space:nowrap;font-size:8px;
+     border:1px solid rgba(0,80,200,.4);color:#111;
+     padding:0 1px;transform:translateY(-100%);
+     overflow:visible;min-width:fit-content}}
+</style></head><body>
+<div class='panels'>
+  <div class='panel'><h2>Span-based (reading order)</h2>{span_pre}</div>
+  <div class='panel'><h2>pdf_extract::extract_text</h2>{extract_pre}</div>
+</div>
+<h2>Positioned span map — column bands: Date / Transaction / Amount / Units / Price-NAV / Unit-Balance</h2>
+<div class='map-wrap'>{map_html}</div>
+</body></html>
+"#);
+
+        let out = r"C:\Users\SUMIT\AppData\Local\Temp\cams_spans.html";
         std::fs::write(out, &html).expect("write failed");
         println!("Written: {out}  ({} pages, {} total spans, {} extract lines)",
             pages.len(),

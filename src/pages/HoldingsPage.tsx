@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   TrendingUp, TrendingDown, ArrowRightLeft, RefreshCw,
-  ChevronRight, ChevronDown, Check, ChevronsUpDown, X, FileText,
+  ChevronRight, ChevronDown, Check, ChevronsUpDown, X, FileText, GitMerge,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import {
 import { formatINR, formatQty, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { TransferDialog } from "@/components/holdings/TransferDialog";
+import { SplitDialog } from "@/components/holdings/SplitDialog";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,7 @@ interface Holding {
   isin?: string;
   instrument_type: string;
   asset_class: string;
+  is_pending: boolean;
   account_id: number;
   account_name: string;
   portfolio_id: number;
@@ -54,6 +56,7 @@ interface Transaction {
   txn_id: number;
   txn_type: string;
   trade_date: string;
+  txn_time?: string;
   trade_segment: string;
   quantity: number;
   price_paise: number;
@@ -142,6 +145,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   const [summary, setSummary]         = useState<PortfolioSummary | null>(null);
   const [loading, setLoading]         = useState(true);
   const [syncing, setSyncing]         = useState(false);
+  const [syncError, setSyncError]     = useState<string | null>(null);
   const [lastSyncAt, setLastSyncAt]   = useState<string | null>(null);
 
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
@@ -158,6 +162,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   const [drawerTxns, setDrawerTxns]           = useState<Transaction[]>([]);
   const [drawerLoading, setDrawerLoading]     = useState(false);
   const [transferHolding, setTransferHolding] = useState<Holding | null>(null);
+  const [splitHolding, setSplitHolding]       = useState<Holding | null>(null);
   const [batchDetail, setBatchDetail]   = useState<ImportBatch | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
   // "txn" = showing transaction list; "batch" = showing batch detail inside same sheet
@@ -218,13 +223,17 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
 
   const syncPrices = async () => {
     setSyncing(true);
+    setSyncError(null);
     try {
-      await invoke("resolve_instruments").catch((e: unknown) => console.error("resolve_instruments failed:", e));
+      await invoke("resolve_instruments").catch((e: unknown) => {
+        console.error("resolve_instruments failed:", e);
+      });
       const result = await invoke<{ updated: number; synced_at: string }>("sync_prices", { force: true });
       if (result.synced_at) setLastSyncAt(result.synced_at);
       await load();
-    } catch (e) {
-      console.error("Price sync failed:", e);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSyncError(msg);
     } finally {
       setSyncing(false);
     }
@@ -341,16 +350,23 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
             {summary?.holdings_count ?? 0} position{summary?.holdings_count !== 1 ? "s" : ""} across {summary?.accounts_count ?? 0} account{summary?.accounts_count !== 1 ? "s" : ""}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {lastSyncAt && (
-            <span className="text-xs text-muted-foreground">
-              Prices: {new Date(lastSyncAt + "Z").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-2">
+            {lastSyncAt && (
+              <span className="text-xs text-muted-foreground">
+                Prices: {new Date(lastSyncAt + "Z").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            )}
+            <Button variant="outline" size="sm" onClick={syncPrices} disabled={syncing} className="h-8 gap-1.5">
+              <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
+              {syncing ? "Syncing…" : "Refresh prices"}
+            </Button>
+          </div>
+          {syncError && (
+            <span className="text-xs text-destructive max-w-xs text-right truncate" title={syncError}>
+              {syncError}
             </span>
           )}
-          <Button variant="outline" size="sm" onClick={syncPrices} disabled={syncing} className="h-8 gap-1.5">
-            <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
-            {syncing ? "Syncing…" : "Refresh prices"}
-          </Button>
         </div>
       </div>
 
@@ -391,13 +407,13 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
       {/* Filter bar */}
       <div className="flex gap-2 flex-wrap items-center">
         <MultiSelectPopover
-          label="Portfolio"
+          label="PORTFOLIO"
           options={portfolios.map(p => ({ value: p.portfolio_id, label: p.name }))}
           selected={selPortfolios}
           onChange={(ids) => { setSelPortfolios(ids); setSelAccounts([]); }}
         />
         <MultiSelectPopover
-          label="Account"
+          label="ACCOUNT"
           options={visibleAccounts.map(a => ({ value: a.account_id, label: a.broker ? `${a.name} · ${a.broker}` : a.name }))}
           selected={selAccounts}
           onChange={setSelAccounts}
@@ -442,6 +458,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
               onToggle={() => toggleGroup(assetClass)}
               onRowClick={openDrawer}
               onTransfer={setTransferHolding}
+              onSplit={setSplitHolding}
             />
           ))
         )}
@@ -474,6 +491,12 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
         onClose={() => setTransferHolding(null)}
         onDone={() => { setTransferHolding(null); load(); }}
       />
+
+      <SplitDialog
+        holding={splitHolding}
+        onClose={() => setSplitHolding(null)}
+        onDone={() => { setSplitHolding(null); load(); }}
+      />
     </div>
   );
 }
@@ -481,7 +504,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
 // ─── AssetGroup ───────────────────────────────────────────────────────────────
 
 function AssetGroup({
-  assetClass, holdings, collapsed, onToggle, onRowClick, onTransfer,
+  assetClass, holdings, collapsed, onToggle, onRowClick, onTransfer, onSplit,
 }: {
   assetClass: string;
   holdings: Holding[];
@@ -489,6 +512,7 @@ function AssetGroup({
   onToggle: () => void;
   onRowClick: (h: Holding) => void;
   onTransfer: (h: Holding) => void;
+  onSplit: (h: Holding) => void;
 }) {
   const label    = GROUP_LABELS[assetClass] ?? assetClass;
   const color    = ASSET_CLASS_COLORS[assetClass] ?? "bg-slate-100 text-slate-700";
@@ -536,7 +560,7 @@ function AssetGroup({
       {/* Holdings rows */}
       {!collapsed && (
         <div className="divide-y">
-          <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-1.5 bg-muted/10 text-xs text-muted-foreground font-medium border-b">
+          <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-1.5 bg-muted/10 text-xs text-muted-foreground font-medium border-b">
             <span>Instrument</span>
             <span className="text-right w-20">Qty</span>
             <span className="text-right w-24">Avg Cost</span>
@@ -544,7 +568,7 @@ function AssetGroup({
             <span className="text-right w-24">LTP</span>
             <span className="text-right w-28">Mkt Value</span>
             <span className="text-right w-28">P&L</span>
-            <span className="w-8" />
+            <span className="w-16" />
           </div>
           {holdings.map((h) => (
             <HoldingRow
@@ -552,6 +576,7 @@ function AssetGroup({
               holding={h}
               onClick={() => onRowClick(h)}
               onTransfer={() => onTransfer(h)}
+              onSplit={() => onSplit(h)}
             />
           ))}
         </div>
@@ -562,10 +587,11 @@ function AssetGroup({
 
 // ─── HoldingRow ───────────────────────────────────────────────────────────────
 
-function HoldingRow({ holding: h, onClick, onTransfer }: {
+function HoldingRow({ holding: h, onClick, onTransfer, onSplit }: {
   holding: Holding;
   onClick: () => void;
   onTransfer: () => void;
+  onSplit: () => void;
 }) {
   const pnl    = h.unrealized_pnl_paise;
   const pct    = h.unrealized_pnl_pct;
@@ -573,18 +599,27 @@ function HoldingRow({ holding: h, onClick, onTransfer }: {
 
   return (
     <div
-      className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-2.5 hover:bg-muted/20 transition-colors group cursor-pointer items-center"
+      className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-2.5 hover:bg-muted/20 transition-colors group cursor-pointer items-center"
       onClick={onClick}
     >
       {/* Instrument */}
       <div className="min-w-0 pr-3">
-        <p className="text-sm font-medium truncate">{h.instrument_name}</p>
+        <div className="flex items-center gap-1.5">
+          <p className="text-sm font-medium truncate">{h.instrument_name}</p>
+          {h.is_pending && (
+            <span className="shrink-0 text-xs px-1.5 py-0 rounded leading-5 bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400">
+              PENDING
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
           {h.isin && <span className="text-xs text-muted-foreground font-mono">{h.isin}</span>}
           <span className="text-xs text-muted-foreground">{h.account_name}</span>
-          <span className={cn("text-xs px-1.5 py-0 rounded leading-5", ASSET_CLASS_COLORS[h.asset_class] ?? "bg-slate-100 text-slate-700")}>
-            {h.instrument_type}
-          </span>
+          {!h.is_pending && (
+            <span className={cn("text-xs px-1.5 py-0 rounded leading-5", ASSET_CLASS_COLORS[h.asset_class] ?? "bg-slate-100 text-slate-700")}>
+              {h.instrument_type}
+            </span>
+          )}
         </div>
       </div>
 
@@ -630,7 +665,16 @@ function HoldingRow({ holding: h, onClick, onTransfer }: {
       </div>
 
       {/* Actions */}
-      <div className="w-8 flex justify-center" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center gap-0.5 justify-end w-16" onClick={(e) => e.stopPropagation()}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Record split / ISIN change"
+          onClick={onSplit}
+        >
+          <GitMerge className="size-3.5" />
+        </Button>
         <Button
           variant="ghost"
           size="icon"
