@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost, apiPatch } from "@/lib/api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +25,7 @@ interface ImportDialogProps {
 }
 
 type Step = "selector" | "pick" | "password" | "fix" | "preview" | "importing" | "done";
-type ImportSource = "ANGELONE" | "CHOICE_MF" | "CE_GLOBAL" | "ICICI_EQUITY" | "CAMS_CAS" | "CN_CHOICE_EQUITY" | "CN_WOODSTOCK" | "CN_NIRMAL_BANG";
+type ImportSource = "ANGELONE" | "CHOICE_MF" | "CE_GLOBAL" | "ICICI_EQUITY" | "CAMS_CAS" | "CN_CHOICE_EQUITY" | "CN_WOODSTOCK" | "CN_NIRMAL_BANG" | "BAJAJ_FINANCE" | "INVEST_PLUS_OPENING_STOCK";
 
 interface AngelOneParsed {
   trades: AngelOneTrade[];
@@ -119,8 +119,31 @@ interface NirmalBangCnFileParsed {
   _file_path: string;
 }
 
+interface BajajTrade {
+  isin: string; name: string; side: string;
+  quantity: number; price_rs: number; trade_date: string;
+  contract_note_no?: string;
+}
+interface BajajParsed {
+  trades: BajajTrade[];
+  trade_date: string; contract_note_no: string; client_code: string;
+  stt_paise: number; gst_paise: number; exchange_paise: number;
+  stamp_paise: number; other_paise: number; total_payable_paise: number;
+}
+
+interface InvestPlusLot {
+  broker: string; name: string; quantity: number;
+  price_rs: number; amount_rs: number; trade_date: string;
+}
+interface InvestPlusParsed {
+  lots: InvestPlusLot[];
+  portfolio_name: string; financial_year: string;
+  opening_date: string; total_lots: number;
+}
+
 type AnyParsed = AngelOneParsed | ChoiceMfParsed | ChoiceEquityParsed | IciciEquityParsed
-               | CnChoiceEquityFileParsed[] | WoodstockCnFileParsed[] | NirmalBangCnFileParsed[];
+               | CnChoiceEquityFileParsed[] | WoodstockCnFileParsed[] | NirmalBangCnFileParsed[]
+               | BajajParsed | InvestPlusParsed;
 
 interface CasTransaction {
   date: string; description: string; txn_type: string;
@@ -205,10 +228,10 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
   // ── Load data when dialog opens ───────────────────────────────────────────
   useEffect(() => {
     if (isOpen) {
-      invoke<Person[]>("get_persons").then(setPersons).catch(() => {});
-      invoke<Portfolio[]>("get_portfolios").then(setPortfolios).catch(() => {});
-      invoke<Account[]>("get_accounts", { portfolioId: null }).then(setAllAccounts).catch(() => {});
-      invoke<ImportSourceMeta[]>("get_import_sources").then(setSources).catch(() => {});
+      apiGet<Person[]>("/persons").then(setPersons).catch(() => {});
+      apiGet<Portfolio[]>("/portfolios").then(setPortfolios).catch(() => {});
+      apiGet<Account[]>("/accounts").then(setAllAccounts).catch(() => {});
+      apiGet<ImportSourceMeta[]>("/import/sources").then(setSources).catch(() => {});
     }
   }, [isOpen]);
 
@@ -236,6 +259,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
 
   // ── Step pick: pick files ─────────────────────────────────────────────────
   const handlePickFile = async () => {
+    if (source !== "CAMS_CAS" && !selection.account) return;
     const selected = await open({ title: "Select Statement File(s)", multiple: true });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
@@ -253,12 +277,16 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
     setParsing(true);
     setParseError("");
     try {
+      const parseBySource = async <T,>(filePath: string) => apiPost<T>("/import/parse", {
+        source,
+        file_path: filePath,
+        account_id: selection.account?.account_id ?? null,
+        password: pwd,
+      });
+
       // ── CAMS CAS ─────────────────────────────────────────────────────────
       if (source === "CAMS_CAS") {
-        const result = await invoke<CasPreview>("parse_cams_cas_pdf", {
-          filePath: filePaths[0],
-          password: pwd,
-        });
+        const result = await parseBySource<CasPreview>(filePaths[0]);
         setCasPreview(result);
         if (portfolios.length === 1) {
           const pid = portfolios[0].portfolio_id.toString();
@@ -272,9 +300,25 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
 
       // ── Non-CAMS sources ──────────────────────────────────────────────────
       let result: AnyParsed;
-      if (source === "ANGELONE") {
+      if (source === "BAJAJ_FINANCE") {
         const results = await Promise.all(
-          filePaths.map(fp => invoke<AngelOneParsed>("parse_angel_one_xlsx", { filePath: fp }))
+          filePaths.map(fp => parseBySource<BajajParsed>(fp))
+        );
+        result = {
+          trades: results.flatMap(r => r.trades.map(t => ({ ...t, contract_note_no: r.contract_note_no }))),
+          trade_date: results[0]?.trade_date ?? "",
+          contract_note_no: results.length === 1 ? results[0].contract_note_no : "",
+          client_code: results[0]?.client_code ?? "",
+          stt_paise: results.reduce((sum, r) => sum + r.stt_paise, 0),
+          stamp_paise: results.reduce((sum, r) => sum + r.stamp_paise, 0),
+          gst_paise: results.reduce((sum, r) => sum + r.gst_paise, 0),
+          exchange_paise: results.reduce((sum, r) => sum + r.exchange_paise, 0),
+          other_paise: results.reduce((sum, r) => sum + r.other_paise, 0),
+          total_payable_paise: results.reduce((sum, r) => sum + r.total_payable_paise, 0),
+        };
+      } else if (source === "ANGELONE") {
+        const results = await Promise.all(
+          filePaths.map(fp => parseBySource<AngelOneParsed>(fp))
         );
         const mergedA = results.slice(1).reduce((acc, r) => ({
           trades: [...acc.trades, ...r.trades],
@@ -295,7 +339,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
         result = mergedA;
       } else if (source === "CHOICE_MF") {
         const results = await Promise.all(
-          filePaths.map(fp => invoke<ChoiceMfParsed>("parse_choice_mf_pdf", { filePath: fp, password: pwd }))
+          filePaths.map(fp => parseBySource<ChoiceMfParsed>(fp))
         );
         result = results.slice(1).reduce((acc, r) => ({
           transactions: [...acc.transactions, ...r.transactions],
@@ -304,7 +348,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
         }), results[0]);
       } else if (source === "ICICI_EQUITY") {
         const results = await Promise.all(
-          filePaths.map(fp => invoke<IciciEquityParsed>("parse_icici_equity_pdf", { filePath: fp, password: pwd }))
+          filePaths.map(fp => parseBySource<IciciEquityParsed>(fp))
         );
         const merged = results.slice(1).reduce((acc, r) => ({
           transactions:     [...acc.transactions, ...r.transactions],
@@ -340,9 +384,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
       } else if (source === "CN_CHOICE_EQUITY") {
         const files = await Promise.all(
           filePaths.map(async fp => {
-            const r = await invoke<Omit<CnChoiceEquityFileParsed, "_file_path">>(
-              "parse_cn_choice_equity_pdf", { filePath: fp, password: pwd }
-            );
+            const r = await parseBySource<Omit<CnChoiceEquityFileParsed, "_file_path">>(fp);
             return { ...r, _file_path: fp };
           })
         );
@@ -352,9 +394,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
       } else if (source === "CN_WOODSTOCK") {
         const files = await Promise.all(
           filePaths.map(async fp => {
-            const r = await invoke<Omit<WoodstockCnFileParsed, "_file_path">>(
-              "parse_cn_woodstock_pdf", { filePath: fp, password: pwd }
-            );
+            const r = await parseBySource<Omit<WoodstockCnFileParsed, "_file_path">>(fp);
             return { ...r, _file_path: fp };
           })
         );
@@ -362,16 +402,18 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
         setStep("preview");
         return;
       } else if (source === "CN_NIRMAL_BANG") {
-        const files = await invoke<NirmalBangCnFileParsed[]>(
-          "parse_cn_nirmal_bang_pdf", { filePaths, password: pwd ?? "" }
+        const files = await Promise.all(
+          filePaths.map(fp => parseBySource<NirmalBangCnFileParsed>(fp))
         );
         setParsed(files);
         setStep("preview");
         return;
+      } else if (source === "INVEST_PLUS_OPENING_STOCK") {
+        result = await parseBySource<InvestPlusParsed>(filePaths[0]);
       } else {
         // CE_GLOBAL
         const results = await Promise.all(
-          filePaths.map(fp => invoke<ChoiceEquityParsed>("parse_ce_global_pdf", { filePath: fp, password: pwd }))
+          filePaths.map(fp => parseBySource<ChoiceEquityParsed>(fp))
         );
         result = results.slice(1).reduce((acc, r) => ({
           transactions:    [...acc.transactions, ...r.transactions],
@@ -407,7 +449,9 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
       setStep("preview");
     } catch (e: any) {
       const msg = typeof e === "string" ? e : e?.message ?? "Parse failed";
-      if (msg === "PASSWORD_REQUIRED" || msg.includes("PASSWORD_REQUIRED")) {
+      const isPasswordError = msg === "PASSWORD_REQUIRED" || msg.includes("PASSWORD_REQUIRED")
+        || msg === "WRONG_PASSWORD" || msg.includes("WRONG_PASSWORD");
+      if (isPasswordError) {
         setPasswordInput("");
         setSaveForSource(false);
         setSaveAsPan(false);
@@ -427,14 +471,15 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
     setSavingPassword(true);
     setPasswordError("");
     try {
-      if (saveForSource && source) {
-        await invoke("set_setting", { key: `pdf_password:${source}`, value: passwordInput });
+      if (saveForSource && source && selection.account) {
+        await apiPost("/import/password", {
+          source,
+          account_id: selection.account.account_id,
+          password: passwordInput,
+        });
       }
       if (saveAsPan && selection.person) {
-        await invoke("update_person", {
-          personId: selection.person.person_id,
-          input: { name: null, pan: passwordInput },
-        });
+        await apiPatch(`/persons/${selection.person.person_id}`, { name: null, pan: passwordInput });
         setPersons(ps => ps.map(p => p.person_id === selection.person!.person_id ? { ...p, pan: passwordInput } : p));
       }
     } catch {
@@ -468,7 +513,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
     const name = casNewPortfolioName.trim();
     if (!name || !casCreatingForPan) return;
     try {
-      const created = await invoke<Portfolio>("create_portfolio", { input: { name } });
+      const created = await apiPost<Portfolio>("/portfolios", { name, person_id: null });
       setPortfolios(ps => [...ps, created]);
       setCasPortfolioByPan(prev => ({ ...prev, [casCreatingForPan]: created.portfolio_id.toString() }));
       setCasCreatingForPan(null);
@@ -492,7 +537,12 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
           portfolio_id: parseInt(casPortfolioByPan[fund.pan || "__unknown__"]),
           fund,
         }));
-        const result = await invoke<CasImportResult>("import_cams_cas", { input: { assignments } });
+        const result = await apiPost<CasImportResult>("/import/confirm", {
+          source,
+          account_id: 0,
+          data: { assignments },
+          file_name: null,
+        });
         setCasImportResult(result);
         setStep("done");
       } catch (e: any) {
@@ -507,75 +557,21 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
     setStep("importing");
     setImportError("");
     try {
-      if (source === "ANGELONE") {
-        const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: string[] }>(
-          "import_angel_one_trades",
-          { accountId, trades: (parsed as AngelOneParsed).trades },
-        );
-        setImportResult({ imported: r.imported, skipped: r.skipped, autoCreated: r.auto_created_instruments });
-      } else if (source === "CHOICE_MF") {
-        const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number }>(
-          "import_choice_mf_transactions",
-          { accountId, transactions: (parsed as ChoiceMfParsed).transactions },
-        );
-        setImportResult({ imported: r.imported, skipped: r.skipped });
-      } else if (source === "ICICI_EQUITY") {
-        const icici = parsed as IciciEquityParsed;
-        const r = await invoke<{ imported: number; skipped: number; contract_notes_imported: number; contract_notes_skipped: number; auto_created_instruments: number; skipped_details: SkippedDetail[] }>(
-          "import_icici_equity_trades",
-          { accountId, transactions: icici.transactions, contractCharges: icici.contract_charges, filePaths },
-        );
-        setImportResult({ imported: r.imported, skipped: r.skipped, skippedDetails: r.skipped_details });
-      } else if (source === "CN_CHOICE_EQUITY") {
-        let imported = 0, skipped = 0;
-        for (const file of (parsed as CnChoiceEquityFileParsed[])) {
-          const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number }>(
-            "import_cn_choice_equity_trades",
-            { accountId, tradeDate: file.trade_date, cnNumber: file.cn_number,
-              equityRows: file.equity_rows, derivRows: file.deriv_rows,
-              charges: file.charges, filePaths: [file._file_path] },
-          );
-          imported += r.imported; skipped += r.skipped;
-        }
-        setImportResult({ imported, skipped });
-      } else if (source === "CN_WOODSTOCK") {
-        let imported = 0, skipped = 0;
-        for (const file of (parsed as WoodstockCnFileParsed[])) {
-          const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number }>(
-            "import_cn_woodstock_trades",
-            { accountId, tradeDate: file.trade_date, cnNumber: file.cn_number,
-              trades: file.trades, charges: file.charges, filePaths: [file._file_path] },
-          );
-          imported += r.imported; skipped += r.skipped;
-        }
-        setImportResult({ imported, skipped });
-      } else if (source === "CN_NIRMAL_BANG") {
-        let imported = 0, skipped = 0;
-        for (const file of (parsed as NirmalBangCnFileParsed[])) {
-          const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number }>(
-            "import_cn_nirmal_bang_trades",
-            { accountId, tradeDate: file.trade_date, cnNumber: file.cn_number,
-              trades: file.trades, charges: file.charges, filePaths: [file._file_path] },
-          );
-          imported += r.imported; skipped += r.skipped;
-        }
-        setImportResult({ imported, skipped });
-      } else {
-        // CE_GLOBAL
-        const ceGlobal = parsed as ChoiceEquityParsed;
-        const r = await invoke<{ imported: number; skipped: number; auto_created_instruments: number; skipped_details: SkippedDetail[] }>(
-          "import_ce_global_trades",
-          {
-            accountId,
-            transactions:   ceGlobal.transactions,
-            filePaths,
-            charges:        ceGlobal.charges ?? [],
-            statementStart: ceGlobal.statement_start ?? null,
-            statementEnd:   ceGlobal.statement_end ?? null,
-          },
-        );
-        setImportResult({ imported: r.imported, skipped: r.skipped, skippedDetails: r.skipped_details });
-      }
+      const result = await apiPost<{ imported: number; skipped: number; auto_created_instruments?: string[]; skipped_details?: SkippedDetail[] }>(
+        "/import/confirm",
+        {
+          source,
+          account_id: accountId,
+          data: parsed,
+          file_name: filePaths.length === 1 ? filePaths[0] : null,
+        },
+      );
+      setImportResult({
+        imported: result.imported,
+        skipped: result.skipped,
+        autoCreated: Array.isArray(result.auto_created_instruments) ? result.auto_created_instruments : undefined,
+        skippedDetails: result.skipped_details,
+      });
       setStep("done");
     } catch (e: any) {
       setImportError(typeof e === "string" ? e : e?.message ?? "Import failed");
@@ -697,6 +693,48 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
         </table>
       );
     }
+    if (source === "INVEST_PLUS_OPENING_STOCK") {
+      const lots = (parsed as InvestPlusParsed).lots.slice(0, 10);
+      return (
+        <table className="w-full text-xs">
+          <thead><tr className="border-b text-muted-foreground">
+            <th className="py-1 text-left">Purchase Date</th><th className="py-1 text-left">Stock</th>
+            <th className="py-1 text-right">Qty</th><th className="py-1 text-right">Price</th>
+            <th className="py-1 text-right">Amount</th>
+          </tr></thead>
+          <tbody>{lots.map((t, i) => (
+            <tr key={i} className="border-b border-border/40">
+              <td className="py-1 pr-2 text-muted-foreground">{t.trade_date}</td>
+              <td className="py-1 pr-2 font-medium max-w-[160px] truncate">{t.name}</td>
+              <td className="py-1 pr-2 text-right">{t.quantity}</td>
+              <td className="py-1 pr-2 text-right">{formatINR(t.price_rs * 100)}</td>
+              <td className="py-1 text-right">{formatINR(t.amount_rs * 100)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      );
+    }
+    if (source === "BAJAJ_FINANCE") {
+      const trades = (parsed as BajajParsed).trades.slice(0, 10);
+      return (
+        <table className="w-full text-xs">
+          <thead><tr className="border-b text-muted-foreground">
+            <th className="py-1 text-left">Date</th><th className="py-1 text-left">Security</th>
+            <th className="py-1 text-left">Side</th><th className="py-1 text-right">Qty</th>
+            <th className="py-1 text-right">Price</th>
+          </tr></thead>
+          <tbody>{trades.map((t, i) => (
+            <tr key={i} className="border-b border-border/40">
+              <td className="py-1 pr-2 text-muted-foreground">{t.trade_date}</td>
+              <td className="py-1 pr-2 font-medium max-w-[160px] truncate">{t.name}</td>
+              <td className={`py-1 pr-2 font-medium ${t.side === "BUY" ? "text-green-600 dark:text-green-400" : "text-red-500"}`}>{t.side}</td>
+              <td className="py-1 pr-2 text-right">{t.quantity}</td>
+              <td className="py-1 text-right">{formatINR(t.price_rs * 100)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      );
+    }
     const trades = source === "ICICI_EQUITY"
       ? (parsed as IciciEquityParsed).transactions.slice(0, 10)
       : (parsed as ChoiceEquityParsed).transactions.slice(0, 10);
@@ -721,7 +759,9 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
   };
 
   const totalRows = parsed
-    ? source === "ANGELONE"         ? (parsed as AngelOneParsed).trades.length
+    ? source === "ANGELONE"                   ? (parsed as AngelOneParsed).trades.length
+    : source === "BAJAJ_FINANCE"              ? (parsed as BajajParsed).trades.length
+    : source === "INVEST_PLUS_OPENING_STOCK" ? (parsed as InvestPlusParsed).total_lots
     : source === "CE_GLOBAL"        ? (parsed as ChoiceEquityParsed).total_rows
     : source === "ICICI_EQUITY"     ? (parsed as IciciEquityParsed).total_rows
     : source === "CN_CHOICE_EQUITY" ? (parsed as CnChoiceEquityFileParsed[]).reduce((s, f) => s + f.equity_rows.length + f.deriv_rows.length, 0)
@@ -835,9 +875,18 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
                   </div>
                 ))}
               </div>
-              <Button variant="outline" onClick={handlePickFile} type="button" className="w-full">
+              <Button
+                variant="outline"
+                onClick={handlePickFile}
+                type="button"
+                className="w-full"
+                disabled={source !== "CAMS_CAS" && !selection.account}
+              >
                 {filePaths.length > 0 ? "Add more files" : "Browse…"}
               </Button>
+              {source !== "CAMS_CAS" && !selection.account && (
+                <p className="text-xs text-muted-foreground">Select a person, portfolio and account first.</p>
+              )}
             </div>
 
             {parseError && (
@@ -871,8 +920,8 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
                   onChange={e => setSaveForSource(e.target.checked)}
                 />
                 <div>
-                  <div className="text-sm font-medium">Remember for {sourceLabel} imports</div>
-                  <div className="text-xs text-muted-foreground">Saved to local settings — auto-tried next time you import from this source.</div>
+                  <div className="text-sm font-medium">Remember this password for {sourceLabel} on this account</div>
+                  <div className="text-xs text-muted-foreground">Saved to the import password store and auto-tried next time for the same account and source.</div>
                 </div>
               </label>
               {selectedPersonName && (

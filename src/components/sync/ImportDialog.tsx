@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -49,7 +49,7 @@ export function ImportDialog({ open, onOpenChange, onImported }: ImportDialogPro
     setStep("importing");
     setError("");
     try {
-      await invoke("import_data", { password, srcPath });
+      await apiPost("/backup/import", { password, src_path: srcPath });
       setStep("done");
     } catch (e: any) {
       setError(e.toString());

@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import { ArrowUpRight } from "lucide-react";
 import { formatINR, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -28,7 +28,8 @@ interface Transaction {
   instrument_name: string;
   txn_type: string;
   trade_date: string;
-  total_value_paise: number;
+  quantity: number;
+  effective_price_paise: number;
 }
 
 interface CapitalGainsSummary {
@@ -80,10 +81,10 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
 
   useEffect(() => {
     Promise.all([
-      invoke<PortfolioSummary>("get_portfolio_summary", { accountIds: null, portfolioIds: null, assetClasses: null }),
-      invoke<Holding[]>("get_holdings", { accountIds: null, portfolioIds: null, assetClasses: null }),
-      invoke<Transaction[]>("get_transactions", { filter: { limit: 10 } }),
-      invoke<CapitalGainsReport>("get_capital_gains", { fy: null, accountIds: null }),
+      apiPost<PortfolioSummary>("/holdings/summary", { account_ids: null, portfolio_ids: null, asset_classes: null }),
+      apiPost<Holding[]>("/holdings", { account_ids: null, portfolio_ids: null, asset_classes: null }),
+      apiPost<Transaction[]>("/transactions/list", { limit: 10 }),
+      apiPost<CapitalGainsReport>("/reports/capital-gains", { fy: null, account_ids: null }),
     ]).then(([s, h, t, cg]) => {
       setSummary(s);
       setHoldings(h);
@@ -264,7 +265,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                   <span className={cn("text-xs font-semibold shrink-0", TXN_TYPE_COLORS[t.txn_type] ?? "text-muted-foreground")}>
                     {t.txn_type}
                   </span>
-                  <span className="text-sm tabular-nums shrink-0">{formatINR(Math.abs(t.total_value_paise))}</span>
+                  <span className="text-sm tabular-nums shrink-0">{formatINR(Math.round(t.quantity * t.effective_price_paise))}</span>
                 </div>
               ))}
             </div>

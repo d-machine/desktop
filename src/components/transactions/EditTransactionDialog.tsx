@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPatch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,8 +22,9 @@ interface Transaction {
   trade_date: string;
   txn_time?: string;
   quantity: number;
-  price_paise: number;
-  brokerage_paise: number;
+  effective_price_paise: number;
+  actual_price_paise?: number;
+  brokerage_per_unit_paise?: number;
   stt_paise: number;
   other_charges_paise: number;
   notes?: string;
@@ -61,8 +62,8 @@ export function EditTransactionDialog({ open, onOpenChange, transaction, onSaved
     setTradeDate(transaction.trade_date);
     setTxnTime(transaction.txn_time ?? "");
     setQuantity(transaction.quantity.toString());
-    setPrice(paiseToRupees(transaction.price_paise).toString());
-    setBrokerage(paiseToRupees(transaction.brokerage_paise).toString());
+    setPrice(paiseToRupees(transaction.effective_price_paise).toString());
+    setBrokerage("0");
     setStt(paiseToRupees(transaction.stt_paise).toString());
     setOtherCharges(paiseToRupees(transaction.other_charges_paise).toString());
     setNotes(transaction.notes ?? "");
@@ -87,20 +88,19 @@ export function EditTransactionDialog({ open, onOpenChange, transaction, onSaved
     setSaving(true);
     setError("");
     try {
-      await invoke("update_transaction", {
-        input: {
-          txn_id: transaction.txn_id,
-          txn_type: txnType,
-          trade_segment: segment,
-          trade_date: tradeDate,
-          txn_time: txnTime || null,
-          quantity: parseFloat(quantity),
-          price_paise: rupeesToPaise(price),
-          brokerage_paise: rupeesToPaise(brokerage),
-          stt_paise: rupeesToPaise(stt),
-          other_charges_paise: rupeesToPaise(otherCharges),
-          notes: notes || null,
-        },
+      await apiPatch("/transactions", {
+        txn_id: transaction.txn_id,
+        txn_type: txnType,
+        trade_segment: segment,
+        trade_date: tradeDate,
+        txn_time: txnTime || null,
+        quantity: parseFloat(quantity),
+        effective_price_paise: rupeesToPaise(price),
+        actual_price_paise: null,
+        brokerage_per_unit_paise: null,
+        stt_paise: rupeesToPaise(stt),
+        other_charges_paise: rupeesToPaise(otherCharges),
+        notes: notes || null,
       });
       onOpenChange(false);
       onSaved();

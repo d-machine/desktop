@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost, apiDel } from "@/lib/api";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -65,14 +65,20 @@ export function TaxPage() {
   const [fNotes,      setFNotes]      = useState("");
 
   const load = () => {
-    invoke<TaxEntry[]>("get_tax_entries", {
-      personId: filterPerson !== "all" ? parseInt(filterPerson) : null,
-      fy:       filterFY     !== "all" ? filterFY               : null,
-    }).then(setEntries).catch(() => {});
+    setError("");
+    apiPost<TaxEntry[]>("/tax/list", {
+      person_id: filterPerson !== "all" ? parseInt(filterPerson) : null,
+      fy:        filterFY     !== "all" ? filterFY               : null,
+    }).then(setEntries).catch((e: unknown) => {
+      setEntries([]);
+      setError(e instanceof Error ? e.message : String(e));
+    });
   };
 
   useEffect(() => {
-    invoke<Person[]>("get_persons").then(setPersons).catch(() => {});
+    apiGet<Person[]>("/persons").then(setPersons).catch((e: unknown) => {
+      setError(e instanceof Error ? e.message : String(e));
+    });
   }, []);
 
   useEffect(() => { load(); }, [filterPerson, filterFY]);
@@ -99,16 +105,14 @@ export function TaxPage() {
     setSaving(true);
     setError("");
     try {
-      await invoke("create_tax_entry", {
-        input: {
-          person_id:    parseInt(fPersonId),
-          entry_type:   fEntryType,
-          amount_paise: rupeesToPaise(fAmount),
-          entry_date:   fDate,
-          fy:           fFY,
-          txn_id:       null,
-          notes:        fNotes || null,
-        },
+      await apiPost("/tax", {
+        person_id:    parseInt(fPersonId),
+        entry_type:   fEntryType,
+        amount_paise: rupeesToPaise(fAmount),
+        entry_date:   fDate,
+        fy:           fFY,
+        txn_id:       null,
+        notes:        fNotes || null,
       });
       resetForm();
       setShowAdd(false);
@@ -123,7 +127,7 @@ export function TaxPage() {
   const handleDelete = async () => {
     if (!delEntry) return;
     try {
-      await invoke("delete_tax_entry", { entryId: delEntry.entry_id });
+      await apiDel(`/tax/${delEntry.entry_id}`);
       setDelEntry(null);
       load();
     } catch (e: any) {
@@ -182,6 +186,12 @@ export function TaxPage() {
       </div>
 
       {/* Table */}
+      {error && (
+        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
       {entries.length === 0 ? (
         <p className="text-sm text-muted-foreground py-8 text-center">No tax entries found.</p>
       ) : (

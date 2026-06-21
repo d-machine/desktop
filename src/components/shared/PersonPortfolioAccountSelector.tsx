@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -105,8 +105,9 @@ export function PersonPortfolioAccountSelector({
     setSaving(true);
     setPersonError("");
     try {
-      const created = await invoke<Person>("create_person", {
-        input: { name, pan: newPersonPan.trim() || null },
+      const created = await apiPost<Person>("/persons", {
+        name,
+        pan: newPersonPan.trim() || null,
       });
       onPersonCreated?.(created);
       onChange({ person: created, portfolio: undefined, account: undefined });
@@ -129,8 +130,9 @@ export function PersonPortfolioAccountSelector({
     setSaving(true);
     setPortfolioError("");
     try {
-      const created = await invoke<Portfolio>("create_portfolio", {
-        input: { name, person_id: value.person.person_id },
+      const created = await apiPost<Portfolio>("/portfolios", {
+        name,
+        person_id: value.person.person_id,
       });
       onPortfolioCreated?.(created);
       onChange({ ...value, portfolio: created, account: undefined });
@@ -154,14 +156,12 @@ export function PersonPortfolioAccountSelector({
     setAccountError("");
     try {
       const accountType = ACCOUNT_TYPES.find(t => t.value === newAccountType)!;
-      const created = await invoke<Account>("create_account", {
-        input: {
-          portfolio_id: value.portfolio.portfolio_id,
-          name,
-          account_type: newAccountType,
-          broker: accountType.brokerRequired && newAccountBroker ? newAccountBroker : null,
-          account_no: newAccountNo.trim() || null,
-        },
+      const created = await apiPost<Account>("/accounts", {
+        portfolio_id: value.portfolio.portfolio_id,
+        name,
+        account_type: newAccountType,
+        broker: accountType.brokerRequired && newAccountBroker ? newAccountBroker : null,
+        account_no: newAccountNo.trim() || null,
       });
       onAccountCreated?.(created);
       onChange({ ...value, account: created });

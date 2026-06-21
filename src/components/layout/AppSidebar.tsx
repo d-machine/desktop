@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost, clearSessionToken } from "@/lib/api";
 import { Lock } from "lucide-react";
 import {
   Sidebar,
@@ -27,7 +27,8 @@ export function AppSidebar({ currentPage, onNavigate, onLock, portfolioName }: A
   const settingsItems = NAV_ITEMS.filter((i) => i.group === "settings");
 
   const handleLock = async () => {
-    await invoke("lock");
+    await apiPost("/auth/lock", {}).catch(() => {});
+    clearSessionToken();
     onLock();
   };
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, type ColumnDef, type SortingState,
@@ -99,9 +99,9 @@ export function CapitalGainsPage() {
   const load = async (fy?: string) => {
     setLoading(true);
     try {
-      const r = await invoke<CapitalGainsReport>("get_capital_gains", {
+      const r = await apiPost<CapitalGainsReport>("/reports/capital-gains", {
         fy: fy || null,
-        accountIds: null,
+        account_ids: null,
       });
       setReport(r);
       if (!fy && r.all_fys.length > 0 && !selectedFY) {
@@ -128,7 +128,7 @@ export function CapitalGainsPage() {
     if (!path) return;
     setExporting(true);
     try {
-      await invoke("export_tax_report", { fy: selectedFY, path });
+      await apiPost("/reports/export-tax", { fy: selectedFY, dest_path: path });
     } finally {
       setExporting(false);
     }

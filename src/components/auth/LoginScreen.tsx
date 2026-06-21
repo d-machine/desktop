@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost, setSessionToken } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PinInput } from "./PinInput";
 import { ForgotPinFlow } from "./ForgotPinFlow";
 
 interface LoginScreenProps {
-  onUnlocked: () => void;
+  onUnlocked: (token: string) => void;
 }
 
 export function LoginScreen({ onUnlocked }: LoginScreenProps) {
@@ -26,8 +26,9 @@ export function LoginScreen({ onUnlocked }: LoginScreenProps) {
     setLoading(true);
     setError("");
     try {
-      await invoke("login", { pin: currentPin });
-      onUnlocked();
+      const res = await apiPost<{ session_token: string }>("/auth/login", { pin: currentPin });
+      setSessionToken(res.session_token);
+      onUnlocked(res.session_token);
     } catch (e: unknown) {
       const msg = String(e);
       if (msg.includes("Wrong PIN")) {

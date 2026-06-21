@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, type ColumnDef, type SortingState,
@@ -74,9 +74,9 @@ export function IncomePage() {
   const load = async (fy?: string) => {
     setLoading(true);
     try {
-      const r = await invoke<IncomeReport>("get_income", {
+      const r = await apiPost<IncomeReport>("/reports/income", {
         fy: fy || null,
-        accountIds: null,
+        account_ids: null,
       });
       setReport(r);
       if (!fy && r.all_fys.length > 0 && !selectedFY) {

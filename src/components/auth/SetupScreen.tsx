@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost, setSessionToken } from "@/lib/api";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { Button } from "@/components/ui/button";
@@ -43,8 +43,9 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
     setError("");
     setLoading(true);
     try {
-      const recovery = await invoke<string>("setup", { pin, passphrase });
-      setRecoveryJson(recovery);
+      const res = await apiPost<{ session_token: string; recovery_json: string }>("/auth/setup", { pin, passphrase });
+      setSessionToken(res.session_token);
+      setRecoveryJson(res.recovery_json);
       setStep("save-recovery");
     } catch (e: any) {
       setError(e.toString());

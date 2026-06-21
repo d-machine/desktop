@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost, apiDel } from "@/lib/api";
 import {
   useReactTable, getCoreRowModel, flexRender,
   type ColumnDef,
@@ -41,9 +41,9 @@ interface Transaction {
   trade_date: string;
   txn_time?: string;
   quantity: number;
-  price_paise: number;
-  total_value_paise: number;
-  brokerage_paise: number;
+  effective_price_paise: number;
+  actual_price_paise?: number;
+  brokerage_per_unit_paise?: number;
   stt_paise: number;
   other_charges_paise: number;
   notes?: string;
@@ -78,7 +78,7 @@ interface Account { account_id: number; portfolio_id: number; name: string; acco
 type FlagFilter = "all" | "flagged" | "clean";
 type SortDir = "asc" | "desc";
 
-const SORTABLE_COLS = ["trade_date", "instrument_name", "quantity", "price_paise", "total_value_paise"] as const;
+const SORTABLE_COLS = ["trade_date", "instrument_name", "quantity", "effective_price_paise"] as const;
 type SortCol = typeof SORTABLE_COLS[number];
 
 export function TransactionsPage() {
@@ -153,10 +153,12 @@ export function TransactionsPage() {
     };
 
     Promise.all([
-      invoke<Transaction[]>("get_transactions", { filter }),
-      invoke<number>("get_transactions_count", { filter }),
-      invoke<number>("get_flagged_count", { accountIds: activeAccountIds ?? null }),
-    ]).then(([txns, count, flagged]) => {
+      apiPost<Transaction[]>("/transactions/list", filter),
+      apiPost<{ count: number }>("/transactions/count", filter),
+      apiPost<{ count: number }>("/transactions/flagged-count", { account_ids: activeAccountIds ?? null }),
+    ]).then(([txns, countRes, flaggedRes]) => {
+      const count = countRes.count;
+      const flagged = flaggedRes.count;
       if (cancelled) return;
       setTransactions(txns);
       setTotalCount(count);
@@ -171,8 +173,8 @@ export function TransactionsPage() {
   // Initial meta load
   useEffect(() => {
     Promise.all([
-      invoke<Portfolio[]>("get_portfolios"),
-      invoke<Account[]>("get_accounts", { portfolioId: null }),
+      apiGet<Portfolio[]>("/portfolios"),
+      apiGet<Account[]>("/accounts"),
     ]).then(([ps, as_]) => { setPortfolios(ps); setAccounts(as_); });
   }, []);
 
@@ -189,7 +191,7 @@ export function TransactionsPage() {
   const handleReEvaluate = async () => {
     setReEvaluating(true);
     try {
-      await invoke("re_evaluate_flags", { accountId: null });
+      await apiPost("/transactions/re-evaluate-flags", { account_id: null });
       reload();
     } finally {
       setReEvaluating(false);
@@ -198,13 +200,13 @@ export function TransactionsPage() {
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
-    await invoke("delete_transaction", { txnId: deleteTarget.txn_id });
+    await apiDel(`/transactions/${deleteTarget.txn_id}`);
     setDeleteTarget(null);
     reload();
   };
 
   const handleDismissFlag = async (txn: Transaction) => {
-    await invoke("dismiss_transaction_flag", { txnId: txn.txn_id });
+    await apiPost(`/transactions/${txn.txn_id}/dismiss-flag`, {});
     reload();
   };
 
@@ -212,7 +214,7 @@ export function TransactionsPage() {
     setBatchLoading(true);
     setBatchDetail(null);
     try {
-      const b = await invoke<ImportBatch>("get_import_batch", { batchId });
+      const b = await apiGet<ImportBatch>(`/transactions/batch/${batchId}`);
       setBatchDetail(b);
     } finally {
       setBatchLoading(false);
@@ -306,30 +308,31 @@ export function TransactionsPage() {
       size: 80,
     },
     {
-      id: "price_paise",
-      header: () => <SortHeader colId="price_paise" label="Price" right sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
+      id: "effective_price_paise",
+      header: () => <SortHeader colId="effective_price_paise" label="Price" right sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
       cell: ({ row }) => (
         <span className={cn("text-sm tabular-nums text-right block", row.original.flag && !row.original.flag_dismissed && "opacity-50")}>
-          {formatINR(row.original.price_paise)}
+          {formatINR(row.original.effective_price_paise)}
         </span>
       ),
       size: 110,
     },
     {
-      id: "total_value_paise",
-      header: () => <SortHeader colId="total_value_paise" label="Total" right sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />,
+      id: "total_value",
+      header: () => <span className="text-right block text-xs font-medium">Total</span>,
       cell: ({ row }) => {
-        const val = row.original.total_value_paise;
+        const t = row.original;
+        const isSell = ["SELL","REDEMPTION","DIVIDEND","INTEREST","TRANSFER_OUT","SPLIT_OUT","MERGER_OUT","SWITCH_OUT"].includes(t.txn_type);
+        const val = Math.round(t.quantity * t.effective_price_paise);
         return (
           <span className={cn(
             "text-sm tabular-nums text-right block font-medium",
             row.original.flag && !row.original.flag_dismissed
               ? "opacity-50"
-              : val > 0 ? "text-green-600 dark:text-green-400"
-              : val < 0 ? "text-red-600 dark:text-red-400"
-              : ""
+              : isSell ? "text-green-600 dark:text-green-400"
+              : "text-red-600 dark:text-red-400"
           )}>
-            {val < 0 ? "−" : val > 0 ? "+" : ""}₹{Math.abs(val / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+            {isSell ? "+" : "−"}₹{(val / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
           </span>
         );
       },
@@ -592,9 +595,9 @@ export function TransactionsPage() {
         onOpenChange={setShowAdd}
         onSaved={() => {
           reload();
-          invoke("resolve_instruments")
+          apiPost("/prices/resolve-instruments", {})
             .catch(() => {})
-            .then(() => invoke("sync_prices", { force: true }).catch(() => {}));
+            .then(() => apiPost("/prices/sync", { force: true }).catch(() => {}));
         }}
       />
       <EditTransactionDialog
@@ -607,11 +610,16 @@ export function TransactionsPage() {
         open={showImport}
         onOpenChange={setShowImport}
         onImported={() => {
-          invoke<Account[]>("get_accounts", { portfolioId: null }).then(setAccounts);
-          invoke("re_evaluate_flags", { accountId: null }).catch(() => {}).then(reload);
-          invoke("resolve_instruments")
+          apiGet<Account[]>("/accounts").then(setAccounts);
+          setFilterPortfolio("all");
+          setFilterAccount("all");
+          setSearchInput("");
+          setSearch("");
+          setPage(1);
+          apiPost("/transactions/re-evaluate-flags", { account_id: null }).catch(() => {}).then(reload);
+          apiPost("/prices/resolve-instruments", {})
             .catch(() => {})
-            .then(() => invoke("sync_prices", { force: true }).catch(() => {}));
+            .then(() => apiPost("/prices/sync", { force: true }).catch(() => {}));
         }}
       />
       <Sheet open={batchDetail !== null || batchLoading} onOpenChange={(o) => { if (!o) setBatchDetail(null); }}>
@@ -750,12 +758,12 @@ function TxnBatchDetailPanel({ batch, onClose }: { batch: ImportBatch; onClose: 
                 <td className="px-2 py-1.5 max-w-[160px] truncate">{t.instrument_name}</td>
                 <td className="px-2 py-1.5">{t.txn_type}</td>
                 <td className="px-2 py-1.5 tabular-nums text-right">{formatQty(t.quantity)}</td>
-                <td className="px-2 py-1.5 tabular-nums text-right">{formatINR(t.price_paise)}</td>
+                <td className="px-2 py-1.5 tabular-nums text-right">{formatINR(t.effective_price_paise)}</td>
                 <td className={cn("px-2 py-1.5 tabular-nums text-right font-medium",
-                  t.total_value_paise > 0 ? "text-green-600 dark:text-green-400"
-                  : t.total_value_paise < 0 ? "text-red-600 dark:text-red-400" : ""
+                  ["SELL","REDEMPTION","DIVIDEND","INTEREST"].includes(t.txn_type) ? "text-green-600 dark:text-green-400"
+                  : "text-red-600 dark:text-red-400"
                 )}>
-                  {t.total_value_paise < 0 ? "−" : "+"}₹{Math.abs(t.total_value_paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                  {["SELL","REDEMPTION","DIVIDEND","INTEREST"].includes(t.txn_type) ? "+" : "−"}₹{Math.abs(t.quantity * t.effective_price_paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
                 </td>
               </tr>
             ))}

@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost, apiPut, apiDel } from "@/lib/api";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -115,9 +115,9 @@ function ChargeDialog({
     try {
       let saved: Charge;
       if (editing) {
-        saved = await invoke<Charge>("update_charge", { chargeId: editing.charge_id, input });
+        saved = await apiPut<Charge>(`/charges/${editing.charge_id}`, input);
       } else {
-        saved = await invoke<Charge>("create_charge", { input });
+        saved = await apiPost<Charge>("/charges", input);
       }
       onSaved(saved);
     } catch (e: unknown) {
@@ -229,8 +229,8 @@ export function ChargesTab() {
     setLoading(true);
     try {
       const [cs, accts] = await Promise.all([
-        invoke<Charge[]>("get_charges", { accountIds: null }),
-        invoke<Account[]>("get_accounts"),
+        apiPost<Charge[]>("/charges/list", { account_ids: null }),
+        apiGet<Account[]>("/accounts"),
       ]);
       setCharges(cs);
       setAccounts(accts);
@@ -246,7 +246,7 @@ export function ChargesTab() {
   const handleDelete = async (id: number) => {
     setDeleting(id);
     try {
-      await invoke("delete_charge", { chargeId: id });
+      await apiDel(`/charges/${id}`);
       setCharges(prev => prev.filter(c => c.charge_id !== id));
     } finally {
       setDeleting(null);

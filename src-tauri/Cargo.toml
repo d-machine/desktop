@@ -5,12 +5,7 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -18,26 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri               = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
-anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
-once_cell = "1"
-argon2 = "0.5"
-rand = "0.8"
-aes-gcm = "0.10"
-base64 = "0.22"
-zeroize = "1"
-hex = "0.4"
-calamine = { version = "0.26", features = ["dates"] }
-pdf-extract = "0.10"
-lopdf = "0.38"
-regex = "1"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-rust_xlsxwriter = "0.81"
-
+tauri-plugin-fs     = "2"
+# Health poll during sidecar startup
+reqwest             = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }

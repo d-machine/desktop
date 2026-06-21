@@ -24,3 +24,8 @@ dist-ssr
 *.sw?
 
 pyqt6_app/*
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/dist/
+backend/build/

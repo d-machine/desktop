@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -86,17 +86,15 @@ export function TransferDialog({ holding, accounts, onClose, onDone }: Props) {
 
     setSubmitting(true);
     try {
-      await invoke<TransferResult>("transfer_holding", {
-        input: {
-          from_account_id: holding.account_id,
-          to_account_id: parseInt(toAccountId),
-          instrument_id: holding.instrument_id,
-          quantity: qty,
-          price_paise: Math.round(price * 100),
-          trade_date: tradeDate,
-          trade_segment: tradeSegmentFor(holding.asset_class),
-          notes: notes.trim() || null,
-        },
+      await apiPost<TransferResult>("/transactions/transfer", {
+        from_account_id: holding.account_id,
+        to_account_id: parseInt(toAccountId),
+        instrument_id: holding.instrument_id,
+        quantity: qty,
+        effective_price_paise: Math.round(price * 100),
+        trade_date: tradeDate,
+        trade_segment: tradeSegmentFor(holding.asset_class),
+        notes: notes.trim() || null,
       });
       onDone();
     } catch (e: any) {

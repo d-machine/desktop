@@ -89,7 +89,19 @@
       "WebFetch(domain:docs.aspose.com)",
       "PowerShell(winget list poppler 2>&1)",
       "PowerShell(choco list poppler 2>&1)",
-      "WebFetch(domain:crates.io)"
+      "WebFetch(domain:crates.io)",
+      "Bash(npm install *)",
+      "PowerShell(ls \"$env:LOCALAPPDATA\" | Where-Object { $_.Name -match \"dmachine|desktop|arthdesk\" })",
+      "PowerShell(ls \"$env:LOCALAPPDATA\\\\com.dmachine.desktop\")",
+      "PowerShell(ls \"$env:LOCALAPPDATA\\\\desktop\")",
+      "PowerShell(ls \"$env:APPDATA\" | Where-Object { $_.Name -match \"dmachine|desktop|arthdesk\" })",
+      "PowerShell(ls \"$env:APPDATA\\\\com.dmachine.desktop\")",
+      "Bash(..venvScriptspython.exe -c ' *)",
+      "PowerShell(ls \"C:\\\\Users\\\\SUMIT\\\\Desktop\\\\harsh\\\\APRIL-26\" | Where-Object { $_.Extension -eq \".pdf\" } | Select-Object Name, Length)",
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue)",
+      "Bash(python -c \"import sqlite3; print\\(sqlite3.sqlite_version\\)\")",
+      "Bash(python -m py_compile routers/transactions.py routers/import_.py services/holdings.py services/reports.py importers/bajaj_finance.py importers/invest_plus_opening_stock.py importers/angel_one.py)",
+      "Bash(.venv/Scripts/python -c ' *)"
     ]
   }
 }

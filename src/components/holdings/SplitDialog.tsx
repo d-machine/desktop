@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -88,18 +88,16 @@ export function SplitDialog({ holding, onClose, onDone }: Props) {
 
     setSubmitting(true);
     try {
-      await invoke<SplitResult>("create_split", {
-        input: {
-          account_id:            holding.account_id,
-          from_instrument_id:    holding.instrument_id,
-          to_instrument_id:      toInstrumentId,
-          to_pending:            toPending,
-          qty_before:            holding.quantity,
-          qty_after:             qtyAfterNum,
-          avg_cost_before_paise: holding.avg_cost_paise,
-          trade_date:            tradeDate,
-          notes:                 notes.trim() || null,
-        },
+      await apiPost<SplitResult>("/transactions/split", {
+        account_id:            holding.account_id,
+        from_instrument_id:    holding.instrument_id,
+        to_instrument_id:      toInstrumentId,
+        to_pending:            toPending,
+        qty_before:            holding.quantity,
+        qty_after:             qtyAfterNum,
+        avg_cost_before_paise: holding.avg_cost_paise,
+        trade_date:            tradeDate,
+        notes:                 notes.trim() || null,
       });
       onDone();
     } catch (e: unknown) {

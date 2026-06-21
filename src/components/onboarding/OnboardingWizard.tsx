@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost } from "@/lib/api";
 import { Plus, Trash2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,9 +67,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     setSaving(true);
     setError("");
     try {
-      const p = await invoke<{ person_id: number }>("create_person", {
-        input: { name, pan: personPan.trim() || null },
-      });
+      const p = await apiPost<{ person_id: number }>("/persons", { name, pan: personPan.trim() || null });
       setPersonId(p.person_id);
       setStep("portfolio");
     } catch (e: any) {
@@ -86,9 +84,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     setSaving(true);
     setError("");
     try {
-      const p = await invoke<{ portfolio_id: number }>("create_portfolio", {
-        input: { name, person_id: personId },
-      });
+      const p = await apiPost<{ portfolio_id: number }>("/portfolios", { name, person_id: personId });
       setPortfolioId(p.portfolio_id);
       setStep("accounts");
     } catch (e: any) {
@@ -108,14 +104,12 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     try {
       for (const a of valid) {
         const type = ACCOUNT_TYPES.find((t) => t.value === a.account_type)!;
-        await invoke("create_account", {
-          input: {
-            portfolio_id: portfolioId,
-            name: a.name.trim(),
-            account_type: a.account_type,
-            broker: type.brokerRequired && a.broker ? a.broker : null,
-            account_no: a.account_no.trim() || null,
-          },
+        await apiPost("/accounts", {
+          portfolio_id: portfolioId,
+          name: a.name.trim(),
+          account_type: a.account_type,
+          broker: type.brokerRequired && a.broker ? a.broker : null,
+          account_no: a.account_no.trim() || null,
         });
       }
       setStep("done");

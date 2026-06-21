@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiPost, setSessionToken } from "@/lib/api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { PinInput } from "./PinInput";
 type Step = "load-file" | "enter-passphrase" | "set-new-pin" | "confirm-new-pin";
 
 interface ForgotPinFlowProps {
-  onRecovered: () => void;
+  onRecovered: (token: string) => void;
   onBack: () => void;
 }
 
@@ -66,12 +66,13 @@ export function ForgotPinFlow({ onRecovered, onBack }: ForgotPinFlowProps) {
     setLoading(true);
     setError("");
     try {
-      await invoke("recover", {
-        recoveryFileContents: recoveryContents,
+      const res = await apiPost<{ session_token: string }>("/auth/recover", {
+        recovery_json: recoveryContents,
         passphrase,
-        newPin,
+        new_pin: newPin,
       });
-      onRecovered();
+      setSessionToken(res.session_token);
+      onRecovered(res.session_token);
     } catch (e: any) {
       setError("Wrong recovery passphrase");
       setStep("enter-passphrase");

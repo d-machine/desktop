@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost } from "@/lib/api";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   TrendingUp, TrendingDown, ArrowRightLeft, RefreshCw,
@@ -17,6 +17,7 @@ import { formatINR, formatQty, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { TransferDialog } from "@/components/holdings/TransferDialog";
 import { SplitDialog } from "@/components/holdings/SplitDialog";
+import { PendingInstrumentManager } from "@/components/instruments/PendingInstrumentManager";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -59,11 +60,11 @@ interface Transaction {
   txn_time?: string;
   trade_segment: string;
   quantity: number;
-  price_paise: number;
-  brokerage_paise: number;
+  effective_price_paise: number;
+  actual_price_paise?: number;
+  brokerage_per_unit_paise?: number;
   stt_paise: number;
   other_charges_paise: number;
-  total_value_paise: number;
   notes?: string;
   broker_ref?: string;
   flag?: string;
@@ -146,6 +147,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   const [loading, setLoading]         = useState(true);
   const [syncing, setSyncing]         = useState(false);
   const [syncError, setSyncError]     = useState<string | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [lastSyncAt, setLastSyncAt]   = useState<string | null>(null);
 
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
@@ -167,6 +169,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   const [batchLoading, setBatchLoading] = useState(false);
   // "txn" = showing transaction list; "batch" = showing batch detail inside same sheet
   const [drawerView, setDrawerView]     = useState<"txn" | "batch">("txn");
+  const [showPendingManager, setShowPendingManager] = useState(false);
 
   // Effective account_ids derived from portfolio + account selections
   const effectiveAccountIds = useMemo((): number[] | null => {
@@ -196,6 +199,15 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
     [holdings]
   );
 
+  const [pendingCount, setPendingCount] = useState(0);
+
+  const loadPendingCount = useCallback(async () => {
+    try {
+      const rows = await apiGet<{ pending_id: number }[]>("/instruments/pending");
+      setPendingCount(rows.length);
+    } catch { /* non-fatal */ }
+  }, []);
+
   const load = useCallback(async (
     accountIds = effectiveAccountIds,
     assetClasses = selAssetClasses,
@@ -203,15 +215,15 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
     setLoading(true);
     try {
       const [h, s] = await Promise.all([
-        invoke<Holding[]>("get_holdings", {
-          accountIds,
-          portfolioIds: null,
-          assetClasses: assetClasses.length > 0 ? assetClasses : null,
+        apiPost<Holding[]>("/holdings", {
+          account_ids: accountIds,
+          portfolio_ids: null,
+          asset_classes: assetClasses.length > 0 ? assetClasses : null,
         }),
-        invoke<PortfolioSummary>("get_portfolio_summary", {
-          accountIds,
-          portfolioIds: null,
-          assetClasses: assetClasses.length > 0 ? assetClasses : null,
+        apiPost<PortfolioSummary>("/holdings/summary", {
+          account_ids: accountIds,
+          portfolio_ids: null,
+          asset_classes: assetClasses.length > 0 ? assetClasses : null,
         }),
       ]);
       setHoldings(h);
@@ -224,16 +236,22 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   const syncPrices = async () => {
     setSyncing(true);
     setSyncError(null);
+    setSyncMessage("Contacting server...");
     try {
-      await invoke("resolve_instruments").catch((e: unknown) => {
-        console.error("resolve_instruments failed:", e);
-      });
-      const result = await invoke<{ updated: number; synced_at: string }>("sync_prices", { force: true });
+      const resolved = await apiPost<{ resolved: number; unresolved: number }>("/prices/resolve-instruments", {});
+      setSyncMessage(
+        resolved.resolved > 0
+          ? `Resolved ${resolved.resolved} instrument${resolved.resolved === 1 ? "" : "s"}...`
+          : "Fetching latest prices..."
+      );
+      const result = await apiPost<{ updated: number; synced_at: string; message?: string }>("/prices/sync", { force: true });
       if (result.synced_at) setLastSyncAt(result.synced_at);
       await load();
+      setSyncMessage(result.message ?? `Updated ${result.updated} price${result.updated === 1 ? "" : "s"}`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setSyncError(msg);
+      setSyncMessage(null);
     } finally {
       setSyncing(false);
     }
@@ -242,20 +260,23 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   // Initial setup
   useEffect(() => {
     Promise.all([
-      invoke<Portfolio[]>("get_portfolios"),
-      invoke<Account[]>("get_accounts", { portfolioId: null }),
-      invoke<string | null>("get_setting", { key: "last_price_sync" }),
-    ]).then(([ps, as_, lastSync]) => {
+      apiGet<Portfolio[]>("/portfolios"),
+      apiGet<Account[]>("/accounts"),
+      apiGet<{ value: string | null }>("/settings/last_price_sync"),
+    ]).then(([ps, as_, setting]) => {
       setPortfolios(ps);
       setAccounts(as_);
-      if (lastSync) setLastSyncAt(lastSync);
+      if (setting.value) setLastSyncAt(setting.value);
     });
     load(null, []);
-    invoke("resolve_instruments").catch(() => {});
+    apiPost("/prices/resolve-instruments", {}).catch(() => {});
   }, []);
 
   // Reload on filter change
   useEffect(() => { load(); }, [effectiveAccountIds, selAssetClasses]);
+
+  // Load pending count from instruments table (independent of holdings filter)
+  useEffect(() => { loadPendingCount(); }, [loadPendingCount]);
 
   // Open transaction drawer
   const openDrawer = async (holding: Holding) => {
@@ -265,13 +286,11 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
     setDrawerView("txn");
     setBatchDetail(null);
     try {
-      const txns = await invoke<Transaction[]>("get_transactions", {
-        filter: {
-          account_ids: [holding.account_id],
-          instrument_id: holding.instrument_id,
-          limit: 500,
-          offset: 0,
-        },
+      const txns = await apiPost<Transaction[]>("/transactions/list", {
+        account_ids: [holding.account_id],
+        instrument_id: holding.instrument_id,
+        limit: 500,
+        offset: 0,
       });
       setDrawerTxns(txns);
     } finally {
@@ -295,7 +314,7 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
     setBatchDetail(null);
     setDrawerView("batch");
     try {
-      const b = await invoke<ImportBatch>("get_import_batch", { batchId });
+      const b = await apiGet<ImportBatch>(`/transactions/batch/${batchId}`);
       setBatchDetail(b);
     } finally {
       setBatchLoading(false);
@@ -357,14 +376,29 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
                 Prices: {new Date(lastSyncAt + "Z").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
               </span>
             )}
+            {pendingCount > 0 && (
+              <Button
+                variant="outline" size="sm"
+                onClick={() => setShowPendingManager(true)}
+                className="h-8 gap-1.5 border-amber-400 text-amber-700 hover:bg-amber-50 dark:border-amber-600 dark:text-amber-400 dark:hover:bg-amber-900/20"
+              >
+                Fix {pendingCount} pending
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={syncPrices} disabled={syncing} className="h-8 gap-1.5">
               <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
               {syncing ? "Syncing…" : "Refresh prices"}
             </Button>
           </div>
-          {syncError && (
-            <span className="text-xs text-destructive max-w-xs text-right truncate" title={syncError}>
-              {syncError}
+          {(syncError || syncMessage) && (
+            <span
+              className={cn(
+                "text-xs max-w-xs text-right truncate",
+                syncError ? "text-destructive" : "text-muted-foreground",
+              )}
+              title={syncError ?? syncMessage ?? undefined}
+            >
+              {syncError ?? syncMessage}
             </span>
           )}
         </div>
@@ -497,6 +531,12 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
         onClose={() => setSplitHolding(null)}
         onDone={() => { setSplitHolding(null); load(); }}
       />
+
+      <PendingInstrumentManager
+        open={showPendingManager}
+        onOpenChange={setShowPendingManager}
+        onResolved={() => { load(); loadPendingCount(); }}
+      />
     </div>
   );
 }
@@ -523,7 +563,7 @@ function AssetGroup({
   const pnlPos   = (pnl ?? 0) >= 0;
 
   return (
-    <div className="border rounded-lg overflow-hidden">
+    <div className="border border-slate-400 dark:border-slate-500 rounded-lg overflow-hidden">
       {/* Group header */}
       <button
         className="w-full flex items-center gap-3 px-4 py-3 bg-muted/30 hover:bg-muted/50 transition-colors text-left"
@@ -559,21 +599,22 @@ function AssetGroup({
 
       {/* Holdings rows */}
       {!collapsed && (
-        <div className="divide-y">
-          <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-1.5 bg-muted/10 text-xs text-muted-foreground font-medium border-b">
-            <span>Instrument</span>
-            <span className="text-right w-20">Qty</span>
-            <span className="text-right w-24">Avg Cost</span>
-            <span className="text-right w-24">Invested</span>
-            <span className="text-right w-24">LTP</span>
-            <span className="text-right w-28">Mkt Value</span>
-            <span className="text-right w-28">P&L</span>
-            <span className="w-16" />
+        <div>
+          <div className="grid grid-cols-[minmax(220px,1fr)_80px_104px_140px_96px_140px_148px_64px] gap-0 sticky top-0 z-10 bg-muted backdrop-blur text-xs text-muted-foreground font-medium border-t border-slate-400 dark:border-slate-500">
+            <span className="px-4 py-2 border-r border-b border-slate-400 dark:border-slate-500">Instrument</span>
+            <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">Qty</span>
+            <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">Avg Cost</span>
+            <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">Invested</span>
+            <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">LTP</span>
+            <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">Mkt Value</span>
+            <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">P&L</span>
+            <span className="px-3 py-2 border-b border-slate-400 dark:border-slate-500" />
           </div>
-          {holdings.map((h) => (
+          {holdings.map((h, i) => (
             <HoldingRow
               key={`${h.account_id}-${h.instrument_id}`}
               holding={h}
+              isLast={i === holdings.length - 1}
               onClick={() => onRowClick(h)}
               onTransfer={() => onTransfer(h)}
               onSplit={() => onSplit(h)}
@@ -587,8 +628,9 @@ function AssetGroup({
 
 // ─── HoldingRow ───────────────────────────────────────────────────────────────
 
-function HoldingRow({ holding: h, onClick, onTransfer, onSplit }: {
+function HoldingRow({ holding: h, isLast, onClick, onTransfer, onSplit }: {
   holding: Holding;
+  isLast: boolean;
   onClick: () => void;
   onTransfer: () => void;
   onSplit: () => void;
@@ -596,14 +638,15 @@ function HoldingRow({ holding: h, onClick, onTransfer, onSplit }: {
   const pnl    = h.unrealized_pnl_paise;
   const pct    = h.unrealized_pnl_pct;
   const pnlPos = (pnl ?? 0) >= 0;
+  const b = cn("border-slate-400 dark:border-slate-500", !isLast && "border-b");
 
   return (
     <div
-      className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-2.5 hover:bg-muted/20 transition-colors group cursor-pointer items-center"
+      className="grid grid-cols-[minmax(220px,1fr)_80px_104px_140px_96px_140px_148px_64px] gap-0 hover:bg-muted/20 transition-colors group cursor-pointer items-stretch"
       onClick={onClick}
     >
       {/* Instrument */}
-      <div className="min-w-0 pr-3">
+      <div className={cn("min-w-0 px-4 py-2.5 border-r", b)}>
         <div className="flex items-center gap-1.5">
           <p className="text-sm font-medium truncate">{h.instrument_name}</p>
           {h.is_pending && (
@@ -624,16 +667,16 @@ function HoldingRow({ holding: h, onClick, onTransfer, onSplit }: {
       </div>
 
       {/* Qty */}
-      <span className="text-sm tabular-nums text-right w-20">{formatQty(h.quantity)}</span>
+      <span className={cn("text-sm tabular-nums text-right px-3 py-2.5 border-r flex items-center justify-end", b)}>{formatQty(h.quantity)}</span>
 
       {/* Avg Cost */}
-      <span className="text-sm tabular-nums text-right w-24">{formatINR(h.avg_cost_paise)}</span>
+      <span className={cn("text-sm tabular-nums text-right px-3 py-2.5 border-r flex items-center justify-end", b)}>{formatINR(h.avg_cost_paise)}</span>
 
       {/* Invested */}
-      <span className="text-sm tabular-nums text-right w-24 font-medium">{formatINR(h.total_cost_paise)}</span>
+      <span className={cn("text-sm tabular-nums text-right font-medium px-3 py-2.5 border-r flex items-center justify-end", b)}>{formatINR(h.total_cost_paise)}</span>
 
       {/* LTP */}
-      <div className="text-right w-24">
+      <div className={cn("text-right px-3 py-2.5 border-r flex flex-col items-end justify-center", b)}>
         {h.current_price_paise != null ? (
           <>
             <div className="text-sm tabular-nums">{formatINR(h.current_price_paise)}</div>
@@ -645,12 +688,12 @@ function HoldingRow({ holding: h, onClick, onTransfer, onSplit }: {
       </div>
 
       {/* Mkt Value */}
-      <span className="text-sm tabular-nums text-right w-28 font-medium">
+      <span className={cn("text-sm tabular-nums text-right font-medium px-3 py-2.5 border-r flex items-center justify-end", b)}>
         {h.current_value_paise != null ? formatINR(h.current_value_paise) : <span className="text-xs text-muted-foreground">—</span>}
       </span>
 
       {/* P&L */}
-      <div className="text-right w-28">
+      <div className={cn("text-right px-3 py-2.5 border-r flex flex-col items-end justify-center", b)}>
         {pnl != null ? (
           <div className={cn(pnlPos ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
             <div className="text-sm tabular-nums font-medium flex items-center justify-end gap-0.5">
@@ -665,7 +708,7 @@ function HoldingRow({ holding: h, onClick, onTransfer, onSplit }: {
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-0.5 justify-end w-16" onClick={(e) => e.stopPropagation()}>
+      <div className={cn("flex items-center gap-0.5 justify-end px-1", b)} onClick={(e) => e.stopPropagation()}>
         <Button
           variant="ghost"
           size="icon"
@@ -832,15 +875,15 @@ function TxnRow({ txn, onOpenBatch }: { txn: Transaction; onOpenBatch: (id: numb
         </div>
       </td>
       <td className="py-2 px-3 text-right tabular-nums">{formatQty(txn.quantity)}</td>
-      <td className="py-2 px-3 text-right tabular-nums">{formatINR(txn.price_paise)}</td>
+      <td className="py-2 px-3 text-right tabular-nums">{formatINR(txn.effective_price_paise)}</td>
       <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">
-        {txn.brokerage_paise > 0 ? formatINR(txn.brokerage_paise) : "—"}
+        {(txn.brokerage_per_unit_paise ?? 0) > 0 ? formatINR(txn.brokerage_per_unit_paise!) : "—"}
       </td>
       <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">
         {sttAndOther > 0 ? formatINR(sttAndOther) : "—"}
       </td>
       <td className={cn("py-2 px-3 text-right tabular-nums font-semibold whitespace-nowrap", isBuy ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400")}>
-        {isBuy ? "−" : "+"}{formatINR(Math.abs(txn.total_value_paise))}
+        {isBuy ? "−" : "+"}{formatINR(Math.round(txn.quantity * txn.effective_price_paise))}
       </td>
       <td className="py-2 px-3 font-mono text-muted-foreground text-xs max-w-[100px] truncate">
         {txn.broker_ref ?? "—"}
@@ -1067,12 +1110,12 @@ function BatchView({ batch, loading, onBack }: {
                           <td className="py-2 px-3 font-medium truncate max-w-[180px]">{t.instrument_name}</td>
                           <td className={cn("py-2 px-3 font-semibold", color)}>{t.txn_type}</td>
                           <td className="py-2 px-3 text-right tabular-nums">{formatQty(t.quantity)}</td>
-                          <td className="py-2 px-3 text-right tabular-nums">{formatINR(t.price_paise)}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{formatINR(t.effective_price_paise)}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">
-                            {t.brokerage_paise > 0 ? formatINR(t.brokerage_paise) : "—"}
+                            {(t.brokerage_per_unit_paise ?? 0) > 0 ? formatINR(t.brokerage_per_unit_paise!) : "—"}
                           </td>
                           <td className={cn("py-2 px-3 text-right tabular-nums font-medium", isBuy ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400")}>
-                            {isBuy ? "−" : "+"}{formatINR(Math.abs(t.total_value_paise))}
+                            {isBuy ? "−" : "+"}{formatINR(Math.round(t.quantity * t.effective_price_paise))}
                           </td>
                         </tr>
                       );

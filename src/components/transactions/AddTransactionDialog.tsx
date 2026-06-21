@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -123,9 +123,9 @@ export function AddTransactionDialog({ open, onOpenChange, onSaved }: AddTransac
   // Load person/portfolio/account data when dialog opens
   useEffect(() => {
     if (open) {
-      invoke<Person[]>("get_persons").then(setPersons).catch(() => {});
+      apiGet<Person[]>("/persons").then(setPersons).catch(() => {});
       invoke<Portfolio[]>("get_portfolios").then(setPortfolios).catch(() => {});
-      invoke<Account[]>("get_accounts", { portfolioId: null }).then(setAllAccounts).catch(() => {});
+      apiGet<Account[]>("/accounts").then(setAllAccounts).catch(() => {});
     }
   }, [open]);
 
@@ -205,39 +205,36 @@ export function AddTransactionDialog({ open, onOpenChange, onSaved }: AddTransac
       const isResolved        = instrument.instrument_id > 0;
       const isExistingPending = instrument.pending_instrument_id != null;
       const isNewPending      = !isResolved && !isExistingPending && !!instrument.pending_instrument;
-      const txn = await invoke<{ txn_id: number }>("create_transaction", {
-        input: {
-          account_id:          parseInt(accountId),
-          instrument_id:       isResolved        ? instrument.instrument_id         : null,
-          existing_pending_id: isExistingPending ? instrument.pending_instrument_id : null,
-          pending_instrument:  isNewPending      ? instrument.pending_instrument    : null,
-          txn_type:            txnType,
-          trade_segment:       segment,
-          trade_date:          tradeDate,
-          txn_time:            txnTime || null,
-          quantity:            parseFloat(quantity),
-          price_paise:         rupeesToPaise(price),
-          brokerage_paise:     rupeesToPaise(brokerage),
-          stt_paise:           rupeesToPaise(stt),
-          other_charges_paise: rupeesToPaise(otherCharges),
-          notes:               notes || null,
-          broker_ref:          brokerRef || null,
-        },
+      const txn = await apiPost<{ txn_id: number }>("/transactions", {
+        account_id:          parseInt(accountId),
+        instrument_id:       isResolved        ? instrument.instrument_id         : null,
+        existing_pending_id: isExistingPending ? instrument.pending_instrument_id : null,
+        pending_instrument:  isNewPending      ? instrument.pending_instrument    : null,
+        txn_type:            txnType,
+        trade_segment:       segment,
+        trade_date:          tradeDate,
+        txn_time:            txnTime || null,
+        quantity:            parseFloat(quantity),
+        effective_price_paise: rupeesToPaise(price),
+        brokerage_per_unit_paise: rupeesToPaise(brokerage) > 0 ? Math.round(rupeesToPaise(brokerage) / parseFloat(quantity)) : null,
+        actual_price_paise: null,
+        stt_paise:           rupeesToPaise(stt),
+        other_charges_paise: rupeesToPaise(otherCharges),
+        notes:               notes || null,
+        broker_ref:          brokerRef || null,
       });
 
       const tdsPaise = rupeesToPaise(tds);
       const personId = selection.person?.person_id;
       if (tdsPaise > 0 && personId) {
-        await invoke("create_tax_entry", {
-          input: {
-            person_id:    personId,
-            entry_type:   "TDS",
-            amount_paise: tdsPaise,
-            entry_date:   tradeDate,
-            fy:           dateToFY(tradeDate),
-            txn_id:       txn.txn_id,
-            notes:        `TDS on ${txnType} — ${instrument.name ?? ""}`.trim(),
-          },
+        await apiPost("/tax", {
+          person_id:    personId,
+          entry_type:   "TDS",
+          amount_paise: tdsPaise,
+          entry_date:   tradeDate,
+          fy:           dateToFY(tradeDate),
+          txn_id:       txn.txn_id,
+          notes:        `TDS on ${txnType} — ${instrument.name ?? ""}`.trim(),
         });
       }
 

@@ -18,5 +18,5 @@ export const BROKERS = [
   "Zerodha", "Groww", "Upstox", "Angel One", "HDFC Securities",
   "ICICI Direct", "ICICI Securities", "Kotak Securities", "Motilal Oswal",
   "SBI Securities", "Paytm Money", "5Paisa", "Fyers",
-  "Choice Equity", "Choice Wealth", "Other",
+  "Choice Equity", "Choice Wealth", "Bajaj Finance", "Other",
 ];

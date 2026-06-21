@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { apiGet, apiPost } from "@/lib/api";
 import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PendingInstrumentForm, PendingInstrumentSpec, PendingInstrumentInitialValues, AssetClass } from "./PendingInstrumentForm";
@@ -20,6 +20,7 @@ interface InstrumentSearchProps {
   onChange: (instrument: InstrumentSummary) => void;
   placeholder?: string;
   disabled?: boolean;
+  resolvedOnly?: boolean;
 }
 
 /** Parse `pending_metadata` JSON from the server into PendingInstrumentForm's field map. */
@@ -37,7 +38,7 @@ function parseInitialValues(name: string, assetClass: string, metadataJson?: str
   return { name, type, fields };
 }
 
-export function InstrumentSearch({ value, onChange, placeholder = "Search by name, ISIN or symbol…", disabled }: InstrumentSearchProps) {
+export function InstrumentSearch({ value, onChange, placeholder = "Search by name, ISIN or symbol…", disabled, resolvedOnly }: InstrumentSearchProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<(InstrumentSummary & { pending_instrument_id?: number; pending_metadata?: string })[]>([]);
   const [open, setOpen] = useState(false);
@@ -54,9 +55,10 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
       try {
-        const r = await invoke<(InstrumentSummary & { pending_instrument_id?: number; pending_metadata?: string })[]>(
-          "search_instruments", { query }
+        let r = await apiGet<(InstrumentSummary & { pending_instrument_id?: number; pending_metadata?: string })[]>(
+          `/instruments/search?q=${encodeURIComponent(query)}`
         );
+        if (resolvedOnly) r = r.filter(i => i.pending_instrument_id == null && i.instrument_id > 0);
         setResults(r);
         setOpen(r.length > 0);
       } finally {
@@ -103,8 +105,7 @@ export function InstrumentSearch({ value, onChange, placeholder = "Search by nam
   const handleManualConfirm = async (spec: PendingInstrumentSpec) => {
     if (existingPendingId != null) {
       // Enrich existing pending instrument's metadata in-place
-      await invoke("update_pending_instrument", {
-        pendingId: existingPendingId,
+      await apiPost(`/instruments/pending/${existingPendingId}`, {
         name: spec.name,
         metadata: spec.metadata,
       }).catch(() => { /* non-fatal — transaction still links correctly */ });
