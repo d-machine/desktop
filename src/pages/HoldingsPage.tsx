@@ -563,44 +563,42 @@ function AssetGroup({
   const pnlPos   = (pnl ?? 0) >= 0;
 
   return (
-    <div className="border border-slate-400 dark:border-slate-500 rounded-lg overflow-hidden">
-      {/* Group header */}
-      <button
-        className="w-full flex items-center gap-3 px-4 py-3 bg-muted/30 hover:bg-muted/50 transition-colors text-left"
-        onClick={onToggle}
-      >
-        {collapsed
-          ? <ChevronRight className="size-4 text-muted-foreground shrink-0" />
-          : <ChevronDown  className="size-4 text-muted-foreground shrink-0" />
-        }
-        <span className={cn("text-xs font-medium px-2 py-0.5 rounded shrink-0", color)}>{label}</span>
-        <span className="text-xs text-muted-foreground">{holdings.length} holding{holdings.length !== 1 ? "s" : ""}</span>
-        <div className="ml-auto flex items-center gap-6 text-right">
-          <div className="hidden sm:flex items-center gap-2">
-            <p className="text-xs text-muted-foreground leading-none">Invested</p>
-            <p className="text-sm font-medium tabular-nums">{formatINR(invested)}</p>
+    <div className="border border-slate-400 dark:border-slate-500 rounded-lg overflow-clip">
+      {/* Group header + column header — sticky together */}
+      <div className="sticky top-0 z-10">
+        <button
+          className="w-full flex items-center gap-3 px-4 py-3 bg-muted hover:bg-muted/80 transition-colors text-left"
+          onClick={onToggle}
+        >
+          {collapsed
+            ? <ChevronRight className="size-4 text-muted-foreground shrink-0" />
+            : <ChevronDown  className="size-4 text-muted-foreground shrink-0" />
+          }
+          <span className={cn("text-xs font-medium px-2 py-0.5 rounded shrink-0", color)}>{label}</span>
+          <span className="text-xs text-muted-foreground">{holdings.length} holding{holdings.length !== 1 ? "s" : ""}</span>
+          <div className="ml-auto flex items-center gap-6 text-right">
+            <div className="hidden sm:flex items-center gap-2">
+              <p className="text-xs text-muted-foreground leading-none">Invested</p>
+              <p className="text-sm font-medium tabular-nums">{formatINR(invested)}</p>
+            </div>
+            {value != null && (
+              <div className="hidden sm:flex items-center gap-2">
+                <p className="text-xs text-muted-foreground leading-none">Market Value</p>
+                <p className="text-sm font-medium tabular-nums">{formatINR(value)}</p>
+              </div>
+            )}
+            {pnl != null && (
+              <div className={cn("flex items-center gap-2", pnlPos ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                <p className="text-xs text-muted-foreground leading-none">P&L</p>
+                <p className="text-sm font-medium tabular-nums">
+                  {pnlPos ? "+" : ""}{formatINR(pnl)}
+                </p>
+              </div>
+            )}
           </div>
-          {value != null && (
-          <div className="hidden sm:flex items-center gap-2">
-              <p className="text-xs text-muted-foreground leading-none">Market Value</p>
-              <p className="text-sm font-medium tabular-nums">{formatINR(value)}</p>
-            </div>
-          )}
-          {pnl != null && (
-            <div className={cn("flex items-center gap-2", pnlPos ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-              <p className="text-xs text-muted-foreground leading-none">P&L</p>
-              <p className="text-sm font-medium tabular-nums">
-                {pnlPos ? "+" : ""}{formatINR(pnl)}
-              </p>
-            </div>
-          )}
-        </div>
-      </button>
-
-      {/* Holdings rows */}
-      {!collapsed && (
-        <div>
-          <div className="grid grid-cols-[minmax(220px,1fr)_80px_104px_140px_96px_140px_148px_64px] gap-0 sticky top-0 z-10 bg-muted backdrop-blur text-xs text-muted-foreground font-medium border-t border-slate-400 dark:border-slate-500">
+        </button>
+        {!collapsed && (
+          <div className="grid grid-cols-[minmax(220px,1fr)_80px_104px_140px_96px_140px_148px_64px] gap-0 bg-muted text-xs text-muted-foreground font-medium border-t border-slate-400 dark:border-slate-500">
             <span className="px-4 py-2 border-r border-b border-slate-400 dark:border-slate-500">Instrument</span>
             <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">Qty</span>
             <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">Avg Cost</span>
@@ -610,6 +608,12 @@ function AssetGroup({
             <span className="px-3 py-2 text-right border-r border-b border-slate-400 dark:border-slate-500">P&L</span>
             <span className="px-3 py-2 border-b border-slate-400 dark:border-slate-500" />
           </div>
+        )}
+      </div>
+
+      {/* Holdings rows */}
+      {!collapsed && (
+        <div>
           {holdings.map((h, i) => (
             <HoldingRow
               key={`${h.account_id}-${h.instrument_id}`}
