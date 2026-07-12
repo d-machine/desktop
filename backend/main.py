@@ -23,6 +23,7 @@ from routers import (
     portfolios,
     prices,
     reports,
+    server_auth,
     settings,
     tax,
     transactions,
@@ -34,6 +35,7 @@ from routers import (
 _parser = argparse.ArgumentParser(description="Arthdesk FastAPI backend")
 _parser.add_argument("--port", type=int, default=8742)
 _parser.add_argument("--db-path", type=str, required=True, help="App data directory path")
+_parser.add_argument("--server-url", type=str, default="", help="Override server URL in app_settings on every startup")
 _args = _parser.parse_args()
 
 APP_DIR = Path(_args.db_path)
@@ -48,6 +50,7 @@ async def lifespan(app: FastAPI):
     app.state.app_dir = APP_DIR
     app.state.db_path = APP_DIR / "portfolio.db"
     app.state.conn = None  # set by POST /api/auth/login or /api/auth/setup
+    app.state.default_server_url = _args.server_url
 
     yield
 
@@ -90,6 +93,7 @@ app.include_router(tax.router,         prefix="/api/tax")
 app.include_router(import_.router,     prefix="/api/import")
 app.include_router(backup.router,      prefix="/api/backup")
 app.include_router(settings.router,    prefix="/api/settings")
+app.include_router(server_auth.router, prefix="/api/server-auth")
 
 
 @app.get("/health")

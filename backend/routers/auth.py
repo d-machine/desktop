@@ -32,7 +32,8 @@ def _require_session(request: Request) -> tuple[str, bytes]:
 
 def _open_db(request: Request, master_key: bytes) -> None:
     if request.app.state.conn is None:
-        conn = db_module.open_database(_app_dir(request), master_key)
+        server_url = getattr(request.app.state, "default_server_url", "")
+        conn = db_module.open_database(_app_dir(request), master_key, default_server_url=server_url)
         request.app.state.conn = conn
 
 

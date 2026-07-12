@@ -89,7 +89,7 @@ function GainValue({ paise }: { paise: number }) {
   );
 }
 
-export function CapitalGainsPage() {
+export function CapitalGainsPage({ personAccountIds }: { personAccountIds?: number[] | null }) {
   const [report, setReport] = useState<CapitalGainsReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedFY, setSelectedFY] = useState<string>("");
@@ -101,7 +101,7 @@ export function CapitalGainsPage() {
     try {
       const r = await apiPost<CapitalGainsReport>("/reports/capital-gains", {
         fy: fy || null,
-        account_ids: null,
+        account_ids: personAccountIds ?? null,
       });
       setReport(r);
       if (!fy && r.all_fys.length > 0 && !selectedFY) {

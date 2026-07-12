@@ -30,6 +30,7 @@ interface Props {
   onPortfolioCreated?: (p: Portfolio) => void;
   onAccountCreated?:   (a: Account)   => void;
   showAccount?: boolean;
+  hidePerson?: boolean;
   error?: string;
 }
 
@@ -40,6 +41,7 @@ export function PersonPortfolioAccountSelector({
   value, onChange,
   onPersonCreated, onPortfolioCreated, onAccountCreated,
   showAccount = true,
+  hidePerson = false,
   error,
 }: Props) {
   // Inline create person
@@ -191,7 +193,7 @@ export function PersonPortfolioAccountSelector({
   return (
     <div className="space-y-3">
       {/* Person */}
-      <div className="space-y-1.5">
+      {!hidePerson && <div className="space-y-1.5">
         <Label>Person</Label>
         {creatingPerson ? (
           <div className="space-y-2">
@@ -229,7 +231,7 @@ export function PersonPortfolioAccountSelector({
             </SelectContent>
           </Select>
         )}
-      </div>
+      </div>}
 
       {/* Portfolio */}
       <div className="space-y-1.5">

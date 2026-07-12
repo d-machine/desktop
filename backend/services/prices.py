@@ -39,6 +39,35 @@ def get_server_url(conn: sqlite3.Connection) -> str:
     return _server_url(conn)
 
 
+def _get_auth_headers(conn: sqlite3.Connection) -> dict[str, str]:
+    token = _get_setting(conn, "server_access_token") or ""
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _refresh_access_token(conn: sqlite3.Connection) -> dict[str, str]:
+    """Try to refresh the server access token. Returns new headers or {}."""
+    refresh_token = _get_setting(conn, "server_refresh_token") or ""
+    if not refresh_token:
+        return {}
+    base_url = _server_url(conn)
+    try:
+        with httpx.Client(timeout=10) as client:
+            res = client.post(f"{base_url}/auth/refresh", json={"refresh_token": refresh_token})
+        if not res.is_success:
+            # Refresh token expired — clear stored tokens
+            _save_setting(conn, "server_access_token", "")
+            _save_setting(conn, "server_refresh_token", "")
+            return {}
+        data = res.json()
+        _save_setting(conn, "server_access_token",  data.get("access_token", ""))
+        _save_setting(conn, "server_refresh_token", data.get("refresh_token", ""))
+        return {"Authorization": f"Bearer {data['access_token']}"}
+    except Exception:
+        return {}
+
+
 def _portfolio_instrument_ids(conn: sqlite3.Connection) -> list[int]:
     rows = conn.execute(
         "SELECT DISTINCT instrument_id FROM transactions WHERE instrument_id IS NOT NULL"
@@ -172,12 +201,20 @@ def resolve_instruments(conn: sqlite3.Connection) -> dict:
     base_url = _server_url(conn)
     logger.info("Resolving %d pending instrument(s) via %s", total, base_url)
 
+    headers = _get_auth_headers(conn)
     with httpx.Client(timeout=30) as client:
         logger.info("Fetching instrument types from %s/instruments/types", base_url)
         _sync_instrument_types(conn, client, base_url)
 
         logger.info("Resolving pending instruments at %s/instruments/resolve", base_url)
-        resp = client.post(f"{base_url}/instruments/resolve", json=pending)
+        resp = client.post(f"{base_url}/instruments/resolve", json=pending, headers=headers)
+        if resp.status_code == 401:
+            headers = _refresh_access_token(conn)
+            if not headers:
+                return {"resolved": 0, "unresolved": total, "message": "Server login required"}
+            resp = client.post(f"{base_url}/instruments/resolve", json=pending, headers=headers)
+        if resp.status_code in (401, 403):
+            return {"resolved": 0, "unresolved": total, "message": "Server login required or subscription inactive"}
         resp.raise_for_status()
         body = resp.json()
         resolved_list = body.get("resolved", [])
@@ -222,9 +259,17 @@ def sync_prices(conn: sqlite3.Connection, force: bool = False) -> dict:
     else:
         url = f"{base_url}/prices/sync?{id_qs}&since_datetime={last_sync}"
 
+    headers = _get_auth_headers(conn)
     with httpx.Client(timeout=30) as client:
         logger.info("Fetching prices from %s", url)
-        resp = client.get(url)
+        resp = client.get(url, headers=headers)
+        if resp.status_code == 401:
+            headers = _refresh_access_token(conn)
+            if not headers:
+                return {"updated": 0, "synced_at": "", "message": "Server login required"}
+            resp = client.get(url, headers=headers)
+        if resp.status_code in (401, 403):
+            return {"updated": 0, "synced_at": "", "message": "Server login required or subscription inactive"}
         resp.raise_for_status()
         body = resp.json()
 
@@ -255,14 +300,14 @@ def sync_prices(conn: sqlite3.Connection, force: bool = False) -> dict:
 
         # Best-effort instrument metadata delta sync
         try:
-            _fetch_instrument_updates(conn, client, base_url)
+            _fetch_instrument_updates(conn, client, base_url, headers=headers)
         except Exception:
             pass
 
     return {"updated": updated, "synced_at": synced_at}
 
 
-def _fetch_instrument_updates(conn: sqlite3.Connection, client: httpx.Client, base_url: str) -> None:
+def _fetch_instrument_updates(conn: sqlite3.Connection, client: httpx.Client, base_url: str, headers: dict | None = None) -> None:
     ids = _portfolio_instrument_ids(conn)
     if not ids:
         return
@@ -272,7 +317,9 @@ def _fetch_instrument_updates(conn: sqlite3.Connection, client: httpx.Client, ba
     if last_sync:
         url += f"&since={last_sync}"
 
-    resp = client.get(url, timeout=30)
+    resp = client.get(url, timeout=30, headers=headers or {})
+    if resp.status_code in (401, 403):
+        return  # Silently skip instrument updates if auth fails
     resp.raise_for_status()
     body = resp.json()
 

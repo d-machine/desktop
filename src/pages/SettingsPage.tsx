@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiGet, apiPost, apiPatch, apiDel } from "@/lib/api";
-import { Plus, Pencil, Trash2, ChevronDown, ChevronRight, Upload, Download } from "lucide-react";
+import { Plus, Trash2, ChevronDown, ChevronRight, Upload, Download, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,16 +19,35 @@ import { ACCOUNT_TYPES, BROKERS } from "@/lib/account-types";
 import { ExportDialog } from "@/components/sync/ExportDialog";
 import { ImportDialog } from "@/components/sync/ImportDialog";
 
-interface Person    { person_id: number; name: string; pan?: string; }
+interface Person {
+  person_id: number;
+  name: string;
+  display_name: string | null;
+  masked_pan?: string;
+  subscription_status?: string | null;
+  subscription_expires_at?: string | null;
+}
+
+function SubBadge({ status, expiresAt }: { status?: string | null; expiresAt?: string | null }) {
+  const date = expiresAt ? expiresAt.slice(0, 10) : null;
+  if (status === "ACTIVE") {
+    return <span className="text-xs text-green-600">Active until {date ?? "—"}</span>;
+  }
+  if (status === "TRIAL") {
+    return <span className="text-xs text-amber-600">Pay by {date ?? "—"}</span>;
+  }
+  if (status === "EXPIRED") {
+    return <span className="text-xs text-destructive">Payment overdue · was due {date ?? "—"}</span>;
+  }
+  if (status === "CANCELLED") {
+    return <span className="text-xs text-muted-foreground">Cancelled</span>;
+  }
+  return <span className="text-xs text-muted-foreground">No subscription</span>;
+}
 interface Portfolio { portfolio_id: number; name: string; person_id?: number; }
 interface Account {
   account_id: number; portfolio_id: number; name: string;
   account_type: string; broker?: string; account_no?: string;
-}
-
-function maskPan(pan: string): string {
-  if (pan.length < 5) return pan;
-  return pan.slice(0, 5) + "·····";
 }
 
 export function SettingsPage() {
@@ -40,13 +59,11 @@ export function SettingsPage() {
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
 
-  const [serverUrl,      setServerUrl]      = useState("");
-  const [serverUrlSaved, setServerUrlSaved] = useState(false);
-
-  const [showNewPerson,   setShowNewPerson]   = useState(false);
-  const [newPersonName,   setNewPersonName]   = useState("");
-  const [newPersonPan,    setNewPersonPan]    = useState("");
-  const [editPerson,      setEditPerson]      = useState<Person | null>(null);
+  const [serverAuth, setServerAuth] = useState<{
+    logged_in: boolean; email: string;
+    subscription_status: string; subscription_expires_at: string;
+  } | null>(null);
+  const [serverAuthLoading, setServerAuthLoading] = useState(false);
 
   const [newPortfolioName,     setNewPortfolioName]     = useState("");
   const [newPortfolioPersonId, setNewPortfolioPersonId] = useState<string>("");
@@ -70,42 +87,11 @@ export function SettingsPage() {
 
   useEffect(() => {
     load();
-    apiGet<{ value: string | null }>("/settings/server_url").then((r) => {
-      if (r.value) setServerUrl(r.value);
-    });
+    apiGet<typeof serverAuth>("/server-auth/status").then(setServerAuth).catch(() => {});
   }, []);
-
-  const handleSaveServerUrl = async () => {
-    try {
-      await apiPost("/settings", { key: "server_url", value: serverUrl.trim() });
-      setServerUrlSaved(true);
-      setTimeout(() => setServerUrlSaved(false), 2000);
-    } catch (e: any) { setError(e.toString()); }
-  };
 
   const toggleExpand = (id: number) =>
     setExpanded((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-
-  const handleCreatePerson = async () => {
-    if (!newPersonName.trim()) return;
-    try {
-      await apiPost("/persons", { name: newPersonName.trim(), pan: newPersonPan.trim() || null });
-      setNewPersonName(""); setNewPersonPan(""); setShowNewPerson(false);
-      await load();
-    } catch (e: any) { setError(e.toString()); }
-  };
-
-  const handleUpdatePerson = async () => {
-    if (!editPerson) return;
-    try {
-      await apiPatch(`/persons/${editPerson.person_id}`, {
-        name: editPerson.name.trim() || null,
-        pan: editPerson.pan?.trim() || "",
-      });
-      setEditPerson(null);
-      await load();
-    } catch (e: any) { setError(e.toString()); }
-  };
 
   const handleCreatePortfolio = async () => {
     if (!newPortfolioName.trim()) return;
@@ -179,11 +165,8 @@ export function SettingsPage() {
 
       {/* People */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-3">
+        <CardHeader className="pb-3">
           <CardTitle className="text-base">People</CardTitle>
-          <Button size="sm" variant="outline" onClick={() => setShowNewPerson(true)}>
-            <Plus className="size-4 mr-1" /> Add Person
-          </Button>
         </CardHeader>
         <CardContent className="space-y-1">
           {persons.length === 0 && (
@@ -194,22 +177,17 @@ export function SettingsPage() {
             return (
               <div key={person.person_id} className="flex items-center gap-2 rounded-md px-2 py-2 hover:bg-muted/40 transition-colors">
                 <div className="flex-1 min-w-0">
-                  <span className="font-medium text-sm">{person.name}</span>
-                  <span className="text-xs text-muted-foreground ml-2">
-                    {person.pan ? maskPan(person.pan) : "no PAN"}
-                  </span>
-                  {personPortfolios.length > 0 && (
-                    <span className="text-xs text-muted-foreground ml-2">
-                      · {personPortfolios.length} portfolio{personPortfolios.length !== 1 ? "s" : ""}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm">{person.display_name || person.name}</span>
+                    <span className="text-xs text-muted-foreground">{person.masked_pan || "no PAN"}</span>
+                    {personPortfolios.length > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        · {personPortfolios.length} portfolio{personPortfolios.length !== 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </div>
+                  <SubBadge status={person.subscription_status} expiresAt={person.subscription_expires_at} />
                 </div>
-                <button
-                  className="p-1 text-muted-foreground hover:text-foreground transition-colors"
-                  onClick={() => setEditPerson({ ...person })}
-                >
-                  <Pencil className="size-3.5" />
-                </button>
               </div>
             );
           })}
@@ -300,46 +278,6 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Dialog open={showNewPerson} onOpenChange={(o) => { if (!o) { setShowNewPerson(false); setNewPersonName(""); setNewPersonPan(""); } }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Add Person</DialogTitle></DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="space-y-1">
-              <Label>Name</Label>
-              <Input placeholder='e.g. "Rahul Sharma"' value={newPersonName} onChange={(e) => setNewPersonName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleCreatePerson()} autoFocus />
-            </div>
-            <div className="space-y-1">
-              <Label>PAN <span className="text-muted-foreground text-xs">(optional)</span></Label>
-              <Input placeholder="e.g. ABCDE1234F" value={newPersonPan} onChange={(e) => setNewPersonPan(e.target.value.toUpperCase())} className="uppercase tracking-widest" maxLength={10} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setShowNewPerson(false); setNewPersonName(""); setNewPersonPan(""); }}>Cancel</Button>
-            <Button onClick={handleCreatePerson} disabled={!newPersonName.trim()}>Add</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!editPerson} onOpenChange={(o) => !o && setEditPerson(null)}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Edit Person</DialogTitle></DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="space-y-1">
-              <Label>Name</Label>
-              <Input value={editPerson?.name ?? ""} onChange={(e) => setEditPerson((p) => p ? { ...p, name: e.target.value } : p)} onKeyDown={(e) => e.key === "Enter" && handleUpdatePerson()} autoFocus />
-            </div>
-            <div className="space-y-1">
-              <Label>PAN <span className="text-muted-foreground text-xs">(optional — clear to remove)</span></Label>
-              <Input placeholder="e.g. ABCDE1234F" value={editPerson?.pan ?? ""} onChange={(e) => setEditPerson((p) => p ? { ...p, pan: e.target.value.toUpperCase() } : p)} className="uppercase tracking-widest" maxLength={10} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditPerson(null)}>Cancel</Button>
-            <Button onClick={handleUpdatePerson} disabled={!editPerson?.name?.trim()}>Save</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={showNewPortfolio} onOpenChange={(o) => { if (!o) { setShowNewPortfolio(false); setNewPortfolioName(""); setNewPortfolioPersonId(""); } }}>
         <DialogContent>
           <DialogHeader><DialogTitle>New Portfolio</DialogTitle></DialogHeader>
@@ -421,17 +359,55 @@ export function SettingsPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Server Account */}
       <Card>
-        <CardHeader className="pb-3"><CardTitle className="text-base">Server</CardTitle></CardHeader>
-        <CardContent>
-          <div className="space-y-2">
-            <Label htmlFor="server-url">API server URL</Label>
-            <div className="flex gap-2">
-              <Input id="server-url" value={serverUrl} onChange={(e) => { setServerUrl(e.target.value); setServerUrlSaved(false); }} onKeyDown={(e) => e.key === "Enter" && handleSaveServerUrl()} placeholder="https://arthdeskapi.ashokitservices.com" className="font-mono text-sm" />
-              <Button variant="outline" size="sm" onClick={handleSaveServerUrl} className="shrink-0">{serverUrlSaved ? "Saved" : "Save"}</Button>
-            </div>
-            <p className="text-xs text-muted-foreground">Used for price sync and instrument resolution.</p>
-          </div>
+        <CardHeader className="pb-3"><CardTitle className="text-base">Server Account</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          {!serverAuth ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : serverAuth.logged_in ? (
+            <>
+              <div className="space-y-1 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Email</span><span className="font-medium">{serverAuth.email}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Subscription</span>
+                  <span className={serverAuth.subscription_status === "ACTIVE" ? "text-green-600 font-medium" : "text-amber-600 font-medium"}>
+                    {serverAuth.subscription_status || "None"}
+                  </span>
+                </div>
+                {serverAuth.subscription_expires_at && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">Expires</span><span>{serverAuth.subscription_expires_at.slice(0, 10)}</span></div>
+                )}
+              </div>
+              <div className="flex gap-2 pt-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={serverAuthLoading}
+                  onClick={async () => {
+                    setServerAuthLoading(true);
+                    try {
+                      const updated = await apiGet<typeof serverAuth>("/server-auth/status");
+                      setServerAuth(updated);
+                    } finally { setServerAuthLoading(false); }
+                  }}
+                >
+                  {serverAuthLoading ? "Refreshing…" : "Refresh status"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    await apiPost("/server-auth/logout", {}).catch(() => {});
+                    setServerAuth({ logged_in: false, email: "", subscription_status: "", subscription_expires_at: "" });
+                  }}
+                >
+                  Logout from server
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">Not logged in. Use the "Server: Not logged in" button in the top navigation to login.</p>
+          )}
         </CardContent>
       </Card>
 

@@ -10,7 +10,7 @@ const TABS: { id: ReportTab; label: string }[] = [
   { id: "charges",       label: "Charges" },
 ];
 
-export function ReportsPage() {
+export function ReportsPage({ personAccountIds }: { personAccountIds?: number[] | null }) {
   const [tab, setTab] = useState<ReportTab>("capital-gains");
 
   return (
@@ -35,8 +35,8 @@ export function ReportsPage() {
 
       {/* Tab content */}
       <div className="flex-1 min-h-0">
-        {tab === "capital-gains" && <CapitalGainsPage />}
-        {tab === "charges"       && <ChargesTab />}
+        {tab === "capital-gains" && <CapitalGainsPage personAccountIds={personAccountIds} />}
+        {tab === "charges"       && <ChargesTab personAccountIds={personAccountIds} />}
       </div>
     </div>
   );

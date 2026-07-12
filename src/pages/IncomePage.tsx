@@ -64,7 +64,7 @@ function SortHeader({ column, label, right }: { column: any; label: string; righ
 
 type IncomeTypeFilter = "ALL" | "DIVIDEND" | "INTEREST";
 
-export function IncomePage() {
+export function IncomePage({ personAccountIds }: { personAccountIds?: number[] | null }) {
   const [report, setReport] = useState<IncomeReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedFY, setSelectedFY] = useState<string>("");
@@ -76,7 +76,7 @@ export function IncomePage() {
     try {
       const r = await apiPost<IncomeReport>("/reports/income", {
         fy: fy || null,
-        account_ids: null,
+        account_ids: personAccountIds ?? null,
       });
       setReport(r);
       if (!fy && r.all_fys.length > 0 && !selectedFY) {

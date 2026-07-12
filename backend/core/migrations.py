@@ -1,8 +1,7 @@
 import sqlite3
 
-# Each entry is one migration. Never modify existing entries — only append.
 _MIGRATIONS = [
-    # M001 — Full schema (squashed)
+    # M001 — Full squashed schema (all versions merged, fresh-install only)
     """
     CREATE TABLE exchanges (
         exchange_id   INTEGER PRIMARY KEY,
@@ -118,10 +117,15 @@ _MIGRATIONS = [
     );
 
     CREATE TABLE persons (
-        person_id   INTEGER PRIMARY KEY,
-        name        TEXT NOT NULL,
-        pan         TEXT,
-        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        person_id               INTEGER PRIMARY KEY,
+        name                    TEXT NOT NULL,
+        masked_pan              TEXT,
+        pan_hash                TEXT,
+        display_name            TEXT,
+        subscription_status     TEXT,
+        subscription_expires_at TEXT,
+        paid_price              INTEGER,
+        created_at              TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE portfolios (
@@ -170,27 +174,27 @@ _MIGRATIONS = [
     );
 
     CREATE TABLE transactions (
-        txn_id                INTEGER PRIMARY KEY,
-        account_id            INTEGER NOT NULL REFERENCES accounts(account_id),
-        instrument_id         INTEGER REFERENCES instruments(instrument_id),
-        pending_instrument_id INTEGER REFERENCES pending_instruments(pending_id),
-        txn_type              TEXT NOT NULL,
-        trade_date            TEXT NOT NULL,
-        txn_time              TEXT,
-        trade_segment         TEXT NOT NULL DEFAULT 'DELIVERY',
-        quantity              REAL NOT NULL,
-        price_paise           INTEGER NOT NULL,
-        brokerage_paise       INTEGER NOT NULL DEFAULT 0,
-        stt_paise             INTEGER NOT NULL DEFAULT 0,
-        other_charges_paise   INTEGER NOT NULL DEFAULT 0,
-        total_value_paise     INTEGER NOT NULL,
-        notes                 TEXT,
-        broker_ref            TEXT,
-        batch_id              INTEGER REFERENCES import_batches(batch_id),
-        created_at            TEXT NOT NULL DEFAULT (datetime('now')),
-        flag                  TEXT    DEFAULT NULL,
-        flag_reason           TEXT    DEFAULT NULL,
-        flag_dismissed        INTEGER NOT NULL DEFAULT 0,
+        txn_id                   INTEGER PRIMARY KEY,
+        account_id               INTEGER NOT NULL REFERENCES accounts(account_id),
+        instrument_id            INTEGER REFERENCES instruments(instrument_id),
+        pending_instrument_id    INTEGER REFERENCES pending_instruments(pending_id),
+        txn_type                 TEXT NOT NULL,
+        trade_date               TEXT NOT NULL,
+        txn_time                 TEXT,
+        trade_segment            TEXT NOT NULL DEFAULT 'DELIVERY',
+        quantity                 REAL NOT NULL,
+        actual_price_paise       REAL,
+        brokerage_per_unit_paise REAL,
+        effective_price_paise    REAL NOT NULL,
+        stt_paise                INTEGER NOT NULL DEFAULT 0,
+        other_charges_paise      INTEGER NOT NULL DEFAULT 0,
+        notes                    TEXT,
+        broker_ref               TEXT,
+        batch_id                 INTEGER REFERENCES import_batches(batch_id),
+        created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+        flag                     TEXT    DEFAULT NULL,
+        flag_reason              TEXT    DEFAULT NULL,
+        flag_dismissed           INTEGER NOT NULL DEFAULT 0,
         CHECK (
             (instrument_id IS NOT NULL AND pending_instrument_id IS NULL) OR
             (instrument_id IS NULL     AND pending_instrument_id IS NOT NULL)
@@ -274,46 +278,46 @@ _MIGRATIONS = [
     CREATE INDEX idx_tax_lots_account_instrument ON tax_lots(account_id, instrument_id);
 
     CREATE TABLE closed_lots (
-        closed_lot_id           INTEGER PRIMARY KEY,
-        portfolio_id            INTEGER NOT NULL,
-        account_id              INTEGER NOT NULL REFERENCES accounts(account_id),
-        instrument_id           INTEGER NOT NULL REFERENCES instruments(instrument_id),
-        buy_txn_id              INTEGER NOT NULL REFERENCES transactions(txn_id),
-        sell_txn_id             INTEGER NOT NULL REFERENCES transactions(txn_id),
-        purchase_date           TEXT NOT NULL,
-        sell_date               TEXT NOT NULL,
-        quantity                REAL NOT NULL,
-        buy_price_paise         INTEGER NOT NULL,
-        sell_price_paise        INTEGER NOT NULL,
-        buy_charges_paise       INTEGER NOT NULL,
-        sell_charges_paise      INTEGER NOT NULL,
-        gross_pnl_paise         INTEGER NOT NULL,
-        net_pnl_paise           INTEGER NOT NULL,
-        holding_days            INTEGER NOT NULL,
-        gain_type               TEXT NOT NULL,
+        closed_lot_id            INTEGER PRIMARY KEY,
+        portfolio_id             INTEGER NOT NULL,
+        account_id               INTEGER NOT NULL REFERENCES accounts(account_id),
+        instrument_id            INTEGER NOT NULL REFERENCES instruments(instrument_id),
+        buy_txn_id               INTEGER NOT NULL REFERENCES transactions(txn_id),
+        sell_txn_id              INTEGER NOT NULL REFERENCES transactions(txn_id),
+        purchase_date            TEXT NOT NULL,
+        sell_date                TEXT NOT NULL,
+        quantity                 REAL NOT NULL,
+        buy_price_paise          INTEGER NOT NULL,
+        sell_price_paise         INTEGER NOT NULL,
+        buy_charges_paise        INTEGER NOT NULL,
+        sell_charges_paise       INTEGER NOT NULL,
+        gross_pnl_paise          INTEGER NOT NULL,
+        net_pnl_paise            INTEGER NOT NULL,
+        holding_days             INTEGER NOT NULL,
+        gain_type                TEXT NOT NULL,
         grandfathered_cost_paise INTEGER,
-        financial_year          TEXT NOT NULL
+        financial_year           TEXT NOT NULL
     );
 
     CREATE INDEX idx_closed_lots_account ON closed_lots(account_id);
     CREATE INDEX idx_closed_lots_fy ON closed_lots(financial_year);
 
     CREATE TABLE intraday_pnl (
-        pnl_id          INTEGER PRIMARY KEY,
-        portfolio_id    INTEGER NOT NULL,
-        account_id      INTEGER NOT NULL REFERENCES accounts(account_id),
-        instrument_id   INTEGER NOT NULL REFERENCES instruments(instrument_id),
-        buy_txn_id      INTEGER NOT NULL REFERENCES transactions(txn_id),
-        sell_txn_id     INTEGER NOT NULL REFERENCES transactions(txn_id),
-        trade_date      TEXT NOT NULL,
-        quantity        REAL NOT NULL,
-        buy_price_paise INTEGER NOT NULL,
+        pnl_id           INTEGER PRIMARY KEY,
+        portfolio_id     INTEGER NOT NULL,
+        account_id       INTEGER NOT NULL REFERENCES accounts(account_id),
+        instrument_id    INTEGER NOT NULL REFERENCES instruments(instrument_id),
+        buy_txn_id       INTEGER NOT NULL REFERENCES transactions(txn_id),
+        sell_txn_id      INTEGER NOT NULL REFERENCES transactions(txn_id),
+        trade_date       TEXT NOT NULL,
+        quantity         REAL NOT NULL,
+        buy_price_paise  INTEGER NOT NULL,
         sell_price_paise INTEGER NOT NULL,
-        gross_pnl_paise INTEGER NOT NULL,
-        charges_paise   INTEGER NOT NULL,
-        net_pnl_paise   INTEGER NOT NULL,
-        trade_segment   TEXT NOT NULL,
-        financial_year  TEXT NOT NULL
+        gross_pnl_paise  INTEGER NOT NULL,
+        charges_paise    INTEGER NOT NULL,
+        net_pnl_paise    INTEGER NOT NULL,
+        trade_segment    TEXT NOT NULL,
+        financial_year   TEXT NOT NULL
     );
 
     CREATE INDEX idx_intraday_pnl_fy ON intraday_pnl(financial_year);
@@ -330,6 +334,21 @@ _MIGRATIONS = [
         tds_paise       INTEGER NOT NULL DEFAULT 0,
         financial_year  TEXT NOT NULL
     );
+
+    CREATE TABLE tax_entries (
+        entry_id     INTEGER PRIMARY KEY,
+        person_id    INTEGER NOT NULL REFERENCES persons(person_id),
+        entry_type   TEXT NOT NULL CHECK(entry_type IN ('TDS','ADVANCE_TAX','SELF_ASSESSMENT_TAX')),
+        amount_paise INTEGER NOT NULL,
+        entry_date   TEXT NOT NULL,
+        fy           TEXT NOT NULL,
+        txn_id       INTEGER REFERENCES transactions(txn_id),
+        notes        TEXT,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX idx_tax_entries_person ON tax_entries(person_id);
+    CREATE INDEX idx_tax_entries_fy     ON tax_entries(person_id, fy);
 
     CREATE TABLE loss_carryforward (
         loss_id             INTEGER PRIMARY KEY,
@@ -350,12 +369,21 @@ _MIGRATIONS = [
     );
 
     INSERT INTO app_settings (key, value) VALUES
-        ('backup_folder_path',    ''),
-        ('backup_max_count',      '5'),
-        ('server_url',            'https://arthdeskapi.ashokitservices.com'),
-        ('last_price_sync',       ''),
-        ('last_instrument_sync',  ''),
-        ('active_view_id',        '');
+        ('backup_folder_path',           ''),
+        ('backup_max_count',             '5'),
+        ('server_url',                   'https://arthdeskapi.ashokitservices.com'),
+        ('last_price_sync',              ''),
+        ('last_instrument_sync',         ''),
+        ('active_view_id',               ''),
+        ('server_access_token',          ''),
+        ('server_refresh_token',         ''),
+        ('server_token_expires_at',      ''),
+        ('server_user_email',            ''),
+        ('server_subscription_status',   ''),
+        ('server_subscription_expires_at', ''),
+        ('rsa_private_key_pem',          ''),
+        ('rsa_public_key_b64',           ''),
+        ('persons_cached_at',            '');
 
     CREATE TABLE report_views (
         view_id     INTEGER PRIMARY KEY,
@@ -405,148 +433,14 @@ _MIGRATIONS = [
     CREATE INDEX idx_charges_account ON charges(account_id);
     CREATE INDEX idx_charges_dates   ON charges(start_date, end_date);
     """,
-
-    # M002 — Tax ledger
+    # Migration: add is_person_default flag to import_passwords
     """
-    CREATE TABLE tax_entries (
-        entry_id     INTEGER PRIMARY KEY,
-        person_id    INTEGER NOT NULL REFERENCES persons(person_id),
-        entry_type   TEXT NOT NULL CHECK(entry_type IN ('TDS','ADVANCE_TAX','SELF_ASSESSMENT_TAX')),
-        amount_paise INTEGER NOT NULL,
-        entry_date   TEXT NOT NULL,
-        fy           TEXT NOT NULL,
-        txn_id       INTEGER REFERENCES transactions(txn_id),
-        notes        TEXT,
-        created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX idx_tax_entries_person ON tax_entries(person_id);
-    CREATE INDEX idx_tax_entries_fy     ON tax_entries(person_id, fy);
-    """,
-
-    # M003 — Transaction price schema redesign
-    # price_paise → actual_price_paise (gross rate per unit, nullable when unknown)
-    # brokerage_paise → brokerage_per_unit_paise (per-unit brokerage, nullable when unknown)
-    # new: effective_price_paise (always non-null: actual ± brokerage, or the only known rate)
-    # drop: total_value_paise (now computed on the fly as qty × effective_price_paise)
-    """
-    ALTER TABLE transactions RENAME COLUMN price_paise TO actual_price_paise;
-    ALTER TABLE transactions RENAME COLUMN brokerage_paise TO brokerage_per_unit_paise;
-    ALTER TABLE transactions ADD COLUMN effective_price_paise INTEGER;
-
-    UPDATE transactions SET effective_price_paise = actual_price_paise;
-
-    CREATE TABLE transactions_m003 (
-        txn_id                   INTEGER PRIMARY KEY,
-        account_id               INTEGER NOT NULL REFERENCES accounts(account_id),
-        instrument_id            INTEGER REFERENCES instruments(instrument_id),
-        pending_instrument_id    INTEGER REFERENCES pending_instruments(pending_id),
-        txn_type                 TEXT NOT NULL,
-        trade_date               TEXT NOT NULL,
-        txn_time                 TEXT,
-        trade_segment            TEXT NOT NULL DEFAULT 'DELIVERY',
-        quantity                 REAL NOT NULL,
-        actual_price_paise       INTEGER,
-        brokerage_per_unit_paise INTEGER,
-        effective_price_paise    INTEGER NOT NULL,
-        stt_paise                INTEGER NOT NULL DEFAULT 0,
-        other_charges_paise      INTEGER NOT NULL DEFAULT 0,
-        notes                    TEXT,
-        broker_ref               TEXT,
-        batch_id                 INTEGER REFERENCES import_batches(batch_id),
-        created_at               TEXT NOT NULL DEFAULT (datetime('now')),
-        flag                     TEXT    DEFAULT NULL,
-        flag_reason              TEXT    DEFAULT NULL,
-        flag_dismissed           INTEGER NOT NULL DEFAULT 0,
-        CHECK (
-            (instrument_id IS NOT NULL AND pending_instrument_id IS NULL) OR
-            (instrument_id IS NULL     AND pending_instrument_id IS NOT NULL)
-        )
-    );
-
-    INSERT INTO transactions_m003
-        SELECT txn_id, account_id, instrument_id, pending_instrument_id,
-               txn_type, trade_date, txn_time, trade_segment, quantity,
-               actual_price_paise, brokerage_per_unit_paise, effective_price_paise,
-               stt_paise, other_charges_paise, notes, broker_ref, batch_id,
-               created_at, flag, flag_reason, flag_dismissed
-        FROM transactions;
-
-    DROP TABLE transactions;
-    ALTER TABLE transactions_m003 RENAME TO transactions;
-
-    CREATE INDEX idx_transactions_account     ON transactions(account_id);
-    CREATE INDEX idx_transactions_instrument  ON transactions(instrument_id)
-        WHERE instrument_id IS NOT NULL;
-    CREATE INDEX idx_transactions_pending     ON transactions(pending_instrument_id)
-        WHERE pending_instrument_id IS NOT NULL;
-    CREATE INDEX idx_transactions_trade_date  ON transactions(trade_date);
-    CREATE INDEX idx_transactions_broker_ref  ON transactions(broker_ref);
-    CREATE UNIQUE INDEX idx_transactions_dedup ON transactions(account_id, broker_ref)
-        WHERE broker_ref IS NOT NULL;
-    """,
-
-    # M004 — Store per-unit prices as REAL to preserve sub-paise precision.
-    # Contract notes carry 4 decimal places (e.g. 42.1645 ₹ = 4216.45 paise).
-    # Storing as INTEGER rounded to whole paise caused ~0.01–0.1 ₹/unit errors
-    # that compounded into material gains miscalculations on large quantities.
-    # All *_paise total/charge columns remain INTEGER (rounded at transaction level).
-    """
-    CREATE TABLE transactions_m004 (
-        txn_id                   INTEGER PRIMARY KEY,
-        account_id               INTEGER NOT NULL REFERENCES accounts(account_id),
-        instrument_id            INTEGER REFERENCES instruments(instrument_id),
-        pending_instrument_id    INTEGER REFERENCES pending_instruments(pending_id),
-        txn_type                 TEXT NOT NULL,
-        trade_date               TEXT NOT NULL,
-        txn_time                 TEXT,
-        trade_segment            TEXT NOT NULL DEFAULT 'DELIVERY',
-        quantity                 REAL NOT NULL,
-        actual_price_paise       REAL,
-        brokerage_per_unit_paise REAL,
-        effective_price_paise    REAL NOT NULL,
-        stt_paise                INTEGER NOT NULL DEFAULT 0,
-        other_charges_paise      INTEGER NOT NULL DEFAULT 0,
-        notes                    TEXT,
-        broker_ref               TEXT,
-        batch_id                 INTEGER REFERENCES import_batches(batch_id),
-        created_at               TEXT NOT NULL DEFAULT (datetime('now')),
-        flag                     TEXT    DEFAULT NULL,
-        flag_reason              TEXT    DEFAULT NULL,
-        flag_dismissed           INTEGER NOT NULL DEFAULT 0,
-        CHECK (
-            (instrument_id IS NOT NULL AND pending_instrument_id IS NULL) OR
-            (instrument_id IS NULL     AND pending_instrument_id IS NOT NULL)
-        )
-    );
-
-    INSERT INTO transactions_m004
-        SELECT txn_id, account_id, instrument_id, pending_instrument_id,
-               txn_type, trade_date, txn_time, trade_segment, quantity,
-               CAST(actual_price_paise AS REAL),
-               CAST(brokerage_per_unit_paise AS REAL),
-               CAST(effective_price_paise AS REAL),
-               stt_paise, other_charges_paise, notes, broker_ref, batch_id,
-               created_at, flag, flag_reason, flag_dismissed
-        FROM transactions;
-
-    DROP TABLE transactions;
-    ALTER TABLE transactions_m004 RENAME TO transactions;
-
-    CREATE INDEX idx_transactions_account     ON transactions(account_id);
-    CREATE INDEX idx_transactions_instrument  ON transactions(instrument_id)
-        WHERE instrument_id IS NOT NULL;
-    CREATE INDEX idx_transactions_pending     ON transactions(pending_instrument_id)
-        WHERE pending_instrument_id IS NOT NULL;
-    CREATE INDEX idx_transactions_trade_date  ON transactions(trade_date);
-    CREATE INDEX idx_transactions_broker_ref  ON transactions(broker_ref);
-    CREATE UNIQUE INDEX idx_transactions_dedup ON transactions(account_id, broker_ref)
-        WHERE broker_ref IS NOT NULL;
+    ALTER TABLE import_passwords ADD COLUMN is_person_default INTEGER NOT NULL DEFAULT 0;
     """,
 ]
 
 
-def run_migrations(conn: sqlite3.Connection) -> None:
+def run_migrations(conn: sqlite3.Connection, default_server_url: str = "") -> None:
     conn.execute(
         """CREATE TABLE IF NOT EXISTS _migrations (
             version    INTEGER PRIMARY KEY,
@@ -562,4 +456,8 @@ def run_migrations(conn: sqlite3.Connection) -> None:
         version = applied + i + 1
         conn.executescript(sql)
         conn.execute("INSERT INTO _migrations (version) VALUES (?)", (version,))
+        conn.commit()
+
+    if default_server_url:
+        conn.execute("UPDATE app_settings SET value=? WHERE key='server_url'", (default_server_url,))
         conn.commit()

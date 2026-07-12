@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { apiPost, setSessionToken } from "@/lib/api";
+import { apiGet, apiPost, setSessionToken } from "@/lib/api";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { Button } from "@/components/ui/button";
@@ -8,14 +8,25 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PinInput } from "./PinInput";
 
-type Step = "set-pin" | "confirm-pin" | "set-passphrase" | "save-recovery";
+type Step = "server-login" | "set-pin" | "confirm-pin" | "set-passphrase" | "save-recovery";
+
+interface ValidateResult {
+  email: string;
+  access_token: string;
+  refresh_token: string;
+  subscription_status: string;
+  subscription_expires_at: string;
+}
 
 interface SetupScreenProps {
   onComplete: () => void;
 }
 
 export function SetupScreen({ onComplete }: SetupScreenProps) {
-  const [step, setStep] = useState<Step>("set-pin");
+  const [step, setStep] = useState<Step>("server-login");
+  const [serverEmail, setServerEmail] = useState("");
+  const [serverPassword, setServerPassword] = useState("");
+  const [validatedCreds, setValidatedCreds] = useState<ValidateResult | null>(null);
   const [pin, setPin] = useState("");
   const [confirmedPin, setConfirmedPin] = useState("");
   const [passphrase, setPassphrase] = useState("");
@@ -24,6 +35,22 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
   const [recoverySaved, setRecoverySaved] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const handleServerLogin = async () => {
+    if (!serverEmail || !serverPassword) { setError("Enter your email and password"); return; }
+    setError("");
+    setLoading(true);
+    try {
+      // Validate against remote server without requiring a local session
+      const result = await apiPost<ValidateResult>("/server-auth/validate", { email: serverEmail, password: serverPassword });
+      setValidatedCreds(result);
+      setStep("set-pin");
+    } catch (e: any) {
+      setError(e?.message || "Login failed. Check your credentials.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handlePinSet = () => {
     if (pin.length < 6) { setError("PIN must be 6 digits"); return; }
@@ -46,6 +73,11 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
       const res = await apiPost<{ session_token: string; recovery_json: string }>("/auth/setup", { pin, passphrase });
       setSessionToken(res.session_token);
       setRecoveryJson(res.recovery_json);
+      // Now that the DB exists and session is active, store server tokens and sync persons
+      if (validatedCreds) {
+        await apiPost("/server-auth/login", { email: validatedCreds.email, password: serverPassword });
+        await apiGet("/server-auth/persons").catch(() => {});
+      }
       setStep("save-recovery");
     } catch (e: any) {
       setError(e.toString());
@@ -73,6 +105,44 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <Card className="w-full max-w-md">
+        {step === "server-login" && (
+          <>
+            <CardHeader className="text-center">
+              <CardTitle className="text-2xl">Sign in to your account</CardTitle>
+              <CardDescription>
+                Sign in to the portfolio server to get started.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Email</Label>
+                <Input
+                  type="email"
+                  placeholder="you@example.com"
+                  value={serverEmail}
+                  onChange={(e) => setServerEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleServerLogin()}
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Password</Label>
+                <Input
+                  type="password"
+                  placeholder="Your password"
+                  value={serverPassword}
+                  onChange={(e) => setServerPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleServerLogin()}
+                />
+              </div>
+              {error && <p className="text-destructive text-sm">{error}</p>}
+              <Button className="w-full" onClick={handleServerLogin} disabled={loading}>
+                {loading ? "Signing in…" : "Sign in"}
+              </Button>
+            </CardContent>
+          </>
+        )}
+
         {step === "set-pin" && (
           <>
             <CardHeader className="text-center">

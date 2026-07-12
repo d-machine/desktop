@@ -103,29 +103,32 @@ fn backend_exe_path(app: &tauri::App) -> PathBuf {
         }
     }
     // Dev mode: use venv Python if it exists, else system Python
-    PathBuf::from("backend/main.py")
+    PathBuf::from("../backend/main.py")
 }
 
 fn spawn_backend(exe: PathBuf, port: u16, db_path: &str) -> Result<Child, String> {
-    let port_str = port.to_string();
+    let port_str   = port.to_string();
+    let server_url = std::env::var("ARTHDESK_SERVER_URL").unwrap_or_default();
 
-    let child = if exe.extension().map(|e| e == "py").unwrap_or(false) {
+    let mut cmd = if exe.extension().map(|e| e == "py").unwrap_or(false) {
         // Dev mode: use venv Python if it exists, else fall back to system Python
-        let venv_python = PathBuf::from("backend/.venv/Scripts/python.exe");
+        let venv_python = PathBuf::from("../backend/.venv/Scripts/python.exe");
         let python = if venv_python.exists() { venv_python } else { PathBuf::from("python") };
-        Command::new(python)
-            .arg(exe)
-            .arg("--port").arg(&port_str)
-            .arg("--db-path").arg(db_path)
-            .spawn()
+        let mut c = Command::new(python);
+        c.arg(exe);
+        c
     } else {
         Command::new(exe)
-            .arg("--port").arg(&port_str)
-            .arg("--db-path").arg(db_path)
-            .spawn()
     };
 
-    child.map_err(|e| format!("Failed to start backend: {e}"))
+    cmd.arg("--port").arg(&port_str).arg("--db-path").arg(db_path);
+    if !server_url.is_empty() {
+        cmd.arg("--server-url").arg(&server_url);
+    }
+    cmd.stdout(std::process::Stdio::inherit())
+       .stderr(std::process::Stdio::inherit());
+
+    cmd.spawn().map_err(|e| format!("Failed to start backend: {e}"))
 }
 
 fn poll_health(port: u16, timeout_secs: u64) -> bool {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { apiGet, apiPost, apiPatch } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import {
   PersonPortfolioAccountSelector,
   type Person, type Portfolio, type Account, type Selection,
 } from "@/components/shared/PersonPortfolioAccountSelector";
+import { type PersonRecord } from "@/App";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,7 @@ interface ImportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImported: () => void;
+  activePerson?: PersonRecord | null;
 }
 
 type Step = "selector" | "pick" | "password" | "fix" | "preview" | "importing" | "done";
@@ -175,7 +177,7 @@ interface ImportSourceMeta { value: ImportSource; label: string; description: st
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportDialogProps) {
+export function ImportDialog({ open: isOpen, onOpenChange, onImported, activePerson }: ImportDialogProps) {
   // Step flow:  selector → pick → [password] → [fix] → preview → importing → done
   // CAMS CAS:  pick → preview → importing → done  (no selector, no password step for now)
 
@@ -194,8 +196,8 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
 
   // Password step
   const [passwordInput, setPasswordInput]     = useState("");
-  const [saveForSource, setSaveForSource]     = useState(false);
-  const [saveAsPan,     setSaveAsPan]         = useState(false);
+  const [saveForSource,      setSaveForSource]      = useState(false);
+  const [saveAsPersonDefault, setSaveAsPersonDefault] = useState(false);
   const [passwordError, setPasswordError]     = useState("");
   const [savingPassword, setSavingPassword]   = useState(false);
 
@@ -228,9 +230,31 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
   // ── Load data when dialog opens ───────────────────────────────────────────
   useEffect(() => {
     if (isOpen) {
-      apiGet<Person[]>("/persons").then(setPersons).catch(() => {});
-      apiGet<Portfolio[]>("/portfolios").then(setPortfolios).catch(() => {});
-      apiGet<Account[]>("/accounts").then(setAllAccounts).catch(() => {});
+      apiGet<Person[]>("/persons").then((ps) => {
+        setPersons(ps);
+        if (activePerson) {
+          const matched = ps.find(p => p.person_id === activePerson.person_id);
+          if (matched) setSelection(prev => ({ ...prev, person: matched }));
+        }
+      }).catch(() => {});
+
+      Promise.all([
+        apiGet<Portfolio[]>("/portfolios"),
+        apiGet<Account[]>("/accounts"),
+      ]).then(([ps, as]) => {
+        setPortfolios(ps);
+        setAllAccounts(as);
+        if (activePerson) {
+          const personPortfolios = ps.filter(p => p.person_id === activePerson.person_id);
+          if (personPortfolios.length === 1) {
+            const onlyPortfolio = personPortfolios[0];
+            const portfolioAccounts = as.filter(a => a.portfolio_id === onlyPortfolio.portfolio_id);
+            const onlyAccount = portfolioAccounts.length === 1 ? portfolioAccounts[0] : undefined;
+            setSelection(prev => ({ ...prev, portfolio: onlyPortfolio, account: onlyAccount }));
+          }
+        }
+      }).catch(() => {});
+
       apiGet<ImportSourceMeta[]>("/import/sources").then(setSources).catch(() => {});
     }
   }, [isOpen]);
@@ -240,7 +264,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
     setStep("selector"); setSource(""); setFilePaths([]);
     setParsing(false); setParseError(""); setParsed(null);
     setSelection({}); setSelectorError("");
-    setPasswordInput(""); setSaveForSource(false); setSaveAsPan(false);
+    setPasswordInput(""); setSaveForSource(false); setSaveAsPersonDefault(false);
     setPasswordError(""); setSavingPassword(false);
     setCasPreview(null); setCasPortfolioByPan({}); setCasCreatingForPan(null);
     setCasNewPortfolioName(""); setCasPortfolioError(""); setCasImportResult(null);
@@ -454,7 +478,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
       if (isPasswordError) {
         setPasswordInput("");
         setSaveForSource(false);
-        setSaveAsPan(false);
+        setSaveAsPersonDefault(false);
         setPasswordError("");
         setStep("password");
       } else {
@@ -471,16 +495,13 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
     setSavingPassword(true);
     setPasswordError("");
     try {
-      if (saveForSource && source && selection.account) {
+      if ((saveForSource || saveAsPersonDefault) && source && selection.account) {
         await apiPost("/import/password", {
           source,
           account_id: selection.account.account_id,
           password: passwordInput,
+          is_person_default: saveAsPersonDefault,
         });
-      }
-      if (saveAsPan && selection.person) {
-        await apiPatch(`/persons/${selection.person.person_id}`, { name: null, pan: passwordInput });
-        setPersons(ps => ps.map(p => p.person_id === selection.person!.person_id ? { ...p, pan: passwordInput } : p));
       }
     } catch {
       // Non-fatal — still try to parse even if saving failed
@@ -541,7 +562,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
           source,
           account_id: 0,
           data: { assignments },
-          file_name: null,
+          file_name: filePaths,
         });
         setCasImportResult(result);
         setStep("done");
@@ -563,7 +584,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
           source,
           account_id: accountId,
           data: parsed,
-          file_name: filePaths.length === 1 ? filePaths[0] : null,
+          file_name: filePaths,
         },
       );
       setImportResult({
@@ -772,7 +793,6 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
 
   const sourceLabel = sources.find(s => s.value === source)?.label ?? source;
   const selectedPersonName = selection.person?.name ?? "";
-  const selectedPersonHasPan = !!selection.person?.pan;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -833,6 +853,7 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
                   onPortfolioCreated={(p) => setPortfolios(ps => [...ps, p])}
                   onAccountCreated={(a) => setAllAccounts(as => [...as, a])}
                   showAccount={true}
+                  hidePerson={!!activePerson}
                 />
               </div>
             )}
@@ -929,16 +950,12 @@ export function ImportDialog({ open: isOpen, onOpenChange, onImported }: ImportD
                   <input
                     type="checkbox"
                     className="mt-0.5"
-                    checked={saveAsPan}
-                    onChange={e => setSaveAsPan(e.target.checked)}
-                    disabled={selectedPersonHasPan}
+                    checked={saveAsPersonDefault}
+                    onChange={e => setSaveAsPersonDefault(e.target.checked)}
                   />
                   <div>
-                    <div className={`text-sm font-medium ${selectedPersonHasPan ? "text-muted-foreground" : ""}`}>
-                      Save as PAN for {selectedPersonName}
-                      {selectedPersonHasPan && <span className="ml-1 text-xs">(already set)</span>}
-                    </div>
-                    <div className="text-xs text-muted-foreground">Stores the password as the PAN on this person's profile.</div>
+                    <div className="text-sm font-medium">Save PDF password to profile</div>
+                    <div className="text-xs text-muted-foreground">Saved on your profile and auto-tried when opening password-protected statements for {selectedPersonName}.</div>
                   </div>
                 </label>
               )}

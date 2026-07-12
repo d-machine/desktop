@@ -28,6 +28,7 @@ import { ImportDialog } from "@/components/transactions/ImportDialog";
 import { formatINR, formatQty, formatDate } from "@/lib/format";
 import { TXN_TYPE_COLORS } from "@/lib/txn-types";
 import { cn } from "@/lib/utils";
+import { type PersonRecord } from "@/App";
 
 interface Transaction {
   txn_id: number;
@@ -81,7 +82,7 @@ type SortDir = "asc" | "desc";
 const SORTABLE_COLS = ["trade_date", "instrument_name", "quantity", "effective_price_paise"] as const;
 type SortCol = typeof SORTABLE_COLS[number];
 
-export function TransactionsPage() {
+export function TransactionsPage({ activePerson, personPortfolioIds, personAccountIds: personAccountIdsProp }: { activePerson: PersonRecord | null; personPortfolioIds?: number[] | null; personAccountIds?: number[] | null }) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [accounts, setAccounts]         = useState<Account[]>([]);
   const [portfolios, setPortfolios]     = useState<Portfolio[]>([]);
@@ -89,6 +90,8 @@ export function TransactionsPage() {
   const [reEvaluating, setReEvaluating] = useState(false);
   const [batchDetail, setBatchDetail]   = useState<ImportBatch | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
+
+  const [accountsReady, setAccountsReady] = useState(false);
 
   const [showAdd, setShowAdd]       = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -125,11 +128,12 @@ export function TransactionsPage() {
     [accounts, filterPortfolio]
   );
 
-  const activeAccountIds = useMemo((): number[] | undefined => {
+  const activeAccountIds = useMemo((): number[] | null => {
     if (filterAccount !== "all") return [parseInt(filterAccount)];
     if (filterPortfolio !== "all") return visibleAccounts.map(a => a.account_id);
-    return undefined;
-  }, [filterAccount, filterPortfolio, visibleAccounts]);
+    // Use person-scoped account IDs from AppLayout as the baseline
+    return personAccountIdsProp ?? null;
+  }, [filterAccount, filterPortfolio, visibleAccounts, personAccountIdsProp]);
 
   // Debounce search input
   useEffect(() => {
@@ -139,6 +143,8 @@ export function TransactionsPage() {
 
   // Main data load
   useEffect(() => {
+    // Wait until AppLayout has resolved person-scoped account IDs
+    if (personAccountIdsProp === undefined) return;
     let cancelled = false;
     setLoading(true);
 
@@ -155,7 +161,7 @@ export function TransactionsPage() {
     Promise.all([
       apiPost<Transaction[]>("/transactions/list", filter),
       apiPost<{ count: number }>("/transactions/count", filter),
-      apiPost<{ count: number }>("/transactions/flagged-count", { account_ids: activeAccountIds ?? null }),
+      apiPost<{ count: number }>("/transactions/flagged-count", { account_ids: activeAccountIds }),
     ]).then(([txns, countRes, flaggedRes]) => {
       const count = countRes.count;
       const flagged = flaggedRes.count;
@@ -168,14 +174,20 @@ export function TransactionsPage() {
     });
 
     return () => { cancelled = true; };
-  }, [activeAccountIds, flagFilter, search, sortCol, sortDir, page, pageSize, loadTick]);
+  }, [personAccountIdsProp, activeAccountIds, flagFilter, search, sortCol, sortDir, page, pageSize, loadTick]);
 
   // Initial meta load
   useEffect(() => {
     Promise.all([
       apiGet<Portfolio[]>("/portfolios"),
       apiGet<Account[]>("/accounts"),
-    ]).then(([ps, as_]) => { setPortfolios(ps); setAccounts(as_); });
+    ]).then(([ps, as_]) => {
+      const filteredPs = personPortfolioIds ? ps.filter(p => personPortfolioIds.includes(p.portfolio_id)) : ps;
+      const filteredAs = personPortfolioIds ? as_.filter(a => personPortfolioIds.includes(a.portfolio_id)) : as_;
+      setPortfolios(filteredPs);
+      setAccounts(filteredAs);
+      setAccountsReady(true);
+    });
   }, []);
 
   const handleSort = useCallback((col: SortCol) => {
@@ -609,6 +621,7 @@ export function TransactionsPage() {
       <ImportDialog
         open={showImport}
         onOpenChange={setShowImport}
+        activePerson={activePerson}
         onImported={() => {
           apiGet<Account[]>("/accounts").then(setAccounts);
           setFilterPortfolio("all");

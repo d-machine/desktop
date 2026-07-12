@@ -70,9 +70,11 @@ const ASSET_CLASS_LABELS: Record<string, string> = {
 
 interface DashboardPageProps {
   onNavigate: (page: Page, instrumentId?: number) => void;
+  personPortfolioIds: number[] | null;
+  personAccountIds: number[] | null;
 }
 
-export function DashboardPage({ onNavigate }: DashboardPageProps) {
+export function DashboardPage({ onNavigate, personPortfolioIds, personAccountIds }: DashboardPageProps) {
   const [summary, setSummary]       = useState<PortfolioSummary | null>(null);
   const [holdings, setHoldings]     = useState<Holding[]>([]);
   const [recentTxns, setRecentTxns] = useState<Transaction[]>([]);
@@ -81,10 +83,10 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
 
   useEffect(() => {
     Promise.all([
-      apiPost<PortfolioSummary>("/holdings/summary", { account_ids: null, portfolio_ids: null, asset_classes: null }),
-      apiPost<Holding[]>("/holdings", { account_ids: null, portfolio_ids: null, asset_classes: null }),
-      apiPost<Transaction[]>("/transactions/list", { limit: 10 }),
-      apiPost<CapitalGainsReport>("/reports/capital-gains", { fy: null, account_ids: null }),
+      apiPost<PortfolioSummary>("/holdings/summary", { account_ids: null, portfolio_ids: personPortfolioIds, asset_classes: null }),
+      apiPost<Holding[]>("/holdings", { account_ids: null, portfolio_ids: personPortfolioIds, asset_classes: null }),
+      apiPost<Transaction[]>("/transactions/list", { limit: 10, account_ids: personAccountIds }),
+      apiPost<CapitalGainsReport>("/reports/capital-gains", { fy: null, account_ids: personAccountIds }),
     ]).then(([s, h, t, cg]) => {
       setSummary(s);
       setHoldings(h);

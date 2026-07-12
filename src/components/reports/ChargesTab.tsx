@@ -218,7 +218,7 @@ function ChargeDialog({
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 
-export function ChargesTab() {
+export function ChargesTab({ personAccountIds }: { personAccountIds?: number[] | null }) {
   const [charges, setCharges]   = useState<Charge[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading]   = useState(true);
@@ -229,7 +229,7 @@ export function ChargesTab() {
     setLoading(true);
     try {
       const [cs, accts] = await Promise.all([
-        apiPost<Charge[]>("/charges/list", { account_ids: null }),
+        apiPost<Charge[]>("/charges/list", { account_ids: personAccountIds ?? null }),
         apiGet<Account[]>("/accounts"),
       ]);
       setCharges(cs);

@@ -141,7 +141,7 @@ const TXN_TYPE_COLORS: Record<string, string> = {
 
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
-export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: number } = {}) {
+export function HoldingsPage({ initialInstrumentId, personPortfolioIds }: { initialInstrumentId?: number; personPortfolioIds?: number[] | null } = {}) {
   const [holdings, setHoldings]       = useState<Holding[]>([]);
   const [summary, setSummary]         = useState<PortfolioSummary | null>(null);
   const [loading, setLoading]         = useState(true);
@@ -214,15 +214,16 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
   ) => {
     setLoading(true);
     try {
+      const portfolioFilter = accountIds ? null : (personPortfolioIds ?? null);
       const [h, s] = await Promise.all([
         apiPost<Holding[]>("/holdings", {
           account_ids: accountIds,
-          portfolio_ids: null,
+          portfolio_ids: portfolioFilter,
           asset_classes: assetClasses.length > 0 ? assetClasses : null,
         }),
         apiPost<PortfolioSummary>("/holdings/summary", {
           account_ids: accountIds,
-          portfolio_ids: null,
+          portfolio_ids: portfolioFilter,
           asset_classes: assetClasses.length > 0 ? assetClasses : null,
         }),
       ]);
@@ -264,8 +265,14 @@ export function HoldingsPage({ initialInstrumentId }: { initialInstrumentId?: nu
       apiGet<Account[]>("/accounts"),
       apiGet<{ value: string | null }>("/settings/last_price_sync"),
     ]).then(([ps, as_, setting]) => {
-      setPortfolios(ps);
-      setAccounts(as_);
+      const filteredPortfolios = personPortfolioIds
+        ? ps.filter(p => personPortfolioIds.includes(p.portfolio_id))
+        : ps;
+      const filteredAccounts = personPortfolioIds
+        ? as_.filter(a => personPortfolioIds.includes(a.portfolio_id))
+        : as_;
+      setPortfolios(filteredPortfolios);
+      setAccounts(filteredAccounts);
       if (setting.value) setLastSyncAt(setting.value);
     });
     load(null, []);

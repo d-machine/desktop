@@ -124,7 +124,7 @@ export function AddTransactionDialog({ open, onOpenChange, onSaved }: AddTransac
   useEffect(() => {
     if (open) {
       apiGet<Person[]>("/persons").then(setPersons).catch(() => {});
-      invoke<Portfolio[]>("get_portfolios").then(setPortfolios).catch(() => {});
+      apiGet<Portfolio[]>("/portfolios").then(setPortfolios).catch(() => {});
       apiGet<Account[]>("/accounts").then(setAllAccounts).catch(() => {});
     }
   }, [open]);

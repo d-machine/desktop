@@ -1,5 +1,7 @@
-import sqlite3
+import json
 import logging
+import shutil
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -61,6 +63,7 @@ class ImportPasswordInput(BaseModel):
     source: str
     account_id: int
     password: str
+    is_person_default: bool = False
 
 
 def _ensure_import_passwords_table(conn: sqlite3.Connection) -> None:
@@ -70,6 +73,7 @@ def _ensure_import_passwords_table(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS import_passwords "
         "(account_id INTEGER NOT NULL REFERENCES accounts(account_id), "
         "source TEXT NOT NULL, password TEXT NOT NULL, "
+        "is_person_default INTEGER NOT NULL DEFAULT 0, "
         "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
         "PRIMARY KEY (account_id, source))"
     )
@@ -80,7 +84,49 @@ class ImportInput(BaseModel):
     source: str
     account_id: int
     data: dict
-    file_name: str | None = None
+    file_name: str | list[str] | None = None
+
+
+def _save_import_document(storage_dir: Path, file_path: str, source: str) -> str:
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    source_path = Path(file_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Import source file not found: {file_path}")
+
+    destination = storage_dir / source_path.name
+    if destination.exists():
+        stem = source_path.stem or "document"
+        suffix = source_path.suffix or ".bin"
+        counter = 1
+        while True:
+            candidate = storage_dir / f"{stem}-{counter}{suffix}"
+            if not candidate.exists():
+                destination = candidate
+                break
+            counter += 1
+
+    shutil.copy2(source_path, destination)
+    return str(destination)
+
+
+def _normalize_import_files(file_name: str | list[str] | None) -> list[str]:
+    if file_name is None:
+        return []
+    if isinstance(file_name, list):
+        return [item for item in file_name if isinstance(item, str) and item.strip()]
+    if isinstance(file_name, str):
+        text = file_name.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                loaded = json.loads(text)
+                if isinstance(loaded, list):
+                    return [item for item in loaded if isinstance(item, str) and item.strip()]
+            except json.JSONDecodeError:
+                pass
+        return [text]
+    return []
 
 
 def _sync_after_import(db_path: str) -> None:
@@ -109,24 +155,28 @@ def parse_statement(body: ParseInput, conn: Conn):
     parser = _get_parser(body.source)
 
     password = body.password
-    saved_password = None
-
     if password is None and body.account_id is not None:
+        # Try account+source specific password first
         row = conn.execute(
             "SELECT password FROM import_passwords WHERE account_id = ? AND source = ?",
             (body.account_id, body.source),
         ).fetchone()
         if row and row[0]:
-            saved_password = row[0]
-            password = saved_password
+            password = row[0]
 
-    # If no saved password exists, auto-try the account owner's PAN
     if password is None and body.account_id is not None:
+        # Fall back to person-level default password (any account for same person)
         row = conn.execute(
-            """SELECT pe.pan FROM accounts a
-               JOIN portfolios po ON a.portfolio_id = po.portfolio_id
-               JOIN persons pe ON po.person_id = pe.person_id
-               WHERE a.account_id = ? AND pe.pan IS NOT NULL""",
+            """SELECT ip.password FROM import_passwords ip
+               JOIN accounts a ON a.account_id = ip.account_id
+               JOIN portfolios po ON po.portfolio_id = a.portfolio_id
+               WHERE po.person_id = (
+                   SELECT po2.person_id FROM accounts a2
+                   JOIN portfolios po2 ON po2.portfolio_id = a2.portfolio_id
+                   WHERE a2.account_id = ?
+               )
+               AND ip.is_person_default = 1
+               LIMIT 1""",
             (body.account_id,),
         ).fetchone()
         if row and row[0]:
@@ -138,7 +188,6 @@ def parse_statement(body: ParseInput, conn: Conn):
         raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:
         err_str = str(e)
-        # Detect password-related failures — PdfminerException str() is ".." when encrypted
         is_pdf_password_err = (
             err_str in ("..", "")
             or "PDFPasswordIncorrect" in type(e).__name__
@@ -147,25 +196,55 @@ def parse_statement(body: ParseInput, conn: Conn):
             or "decrypt" in err_str.lower()
         )
         if is_pdf_password_err:
-            # If caller explicitly supplied a password and it failed, tell them it's wrong
-            if body.password is not None:
-                raise HTTPException(status_code=422, detail="WRONG_PASSWORD")
-            # No password supplied (or auto-tried PAN/saved) — ask frontend to prompt
             raise HTTPException(status_code=422, detail="WRONG_PASSWORD")
         raise HTTPException(status_code=422, detail=f"Parse error: {e}")
+
+    # Masked PAN verification against the active person's server-cached record
+    file_masked_pan: str | None = result.get("masked_pan")
+    if file_masked_pan and body.account_id is not None:
+        person_row = conn.execute(
+            """SELECT pe.masked_pan, pe.name FROM accounts a
+               JOIN portfolios po ON a.portfolio_id = po.portfolio_id
+               JOIN persons pe ON po.person_id = pe.person_id
+               WHERE a.account_id = ?""",
+            (body.account_id,),
+        ).fetchone()
+        if person_row and person_row[0]:
+            if file_masked_pan.upper() != person_row[0].upper():
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"PAN_MISMATCH:{file_masked_pan}:{person_row[1]}",
+                )
+
     return result
 
 
 @router.post("/password")
 def save_import_password(body: ImportPasswordInput, conn: Conn):
     _ensure_import_passwords_table(conn)
+    if body.is_person_default:
+        # Clear existing person-default flag for all accounts belonging to the same person
+        conn.execute(
+            """UPDATE import_passwords SET is_person_default = 0
+               WHERE account_id IN (
+                   SELECT a.account_id FROM accounts a
+                   JOIN portfolios po ON po.portfolio_id = a.portfolio_id
+                   WHERE po.person_id = (
+                       SELECT po2.person_id FROM accounts a2
+                       JOIN portfolios po2 ON po2.portfolio_id = a2.portfolio_id
+                       WHERE a2.account_id = ?
+                   )
+               )""",
+            (body.account_id,),
+        )
     conn.execute(
-        """INSERT INTO import_passwords (account_id, source, password, updated_at)
-           VALUES (?, ?, ?, datetime('now'))
+        """INSERT INTO import_passwords (account_id, source, password, is_person_default, updated_at)
+           VALUES (?, ?, ?, ?, datetime('now'))
            ON CONFLICT(account_id, source) DO UPDATE SET
              password = excluded.password,
+             is_person_default = excluded.is_person_default,
              updated_at = excluded.updated_at""",
-        (body.account_id, body.source, body.password),
+        (body.account_id, body.source, body.password, int(body.is_person_default)),
     )
     conn.commit()
     return {"ok": True}
@@ -175,13 +254,20 @@ def save_import_password(body: ImportPasswordInput, conn: Conn):
 def import_statement(request: Request, body: ImportInput, background_tasks: BackgroundTasks, conn: Conn):
     parser = _get_parser(body.source)
 
+    app_dir = Path(request.app.state.app_dir)
+    storage_dir = app_dir / "imported_documents"
+    stored_files = []
+    for file_path in _normalize_import_files(body.file_name):
+        stored_files.append(_save_import_document(storage_dir, file_path, body.source))
+
     # Create import_batch record first
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    file_name_payload = json.dumps(stored_files) if stored_files else None
     cur = conn.execute(
         """INSERT INTO import_batches
                (account_id, source_type, file_name, imported_at, status)
            VALUES (?, ?, ?, ?, 'COMPLETED')""",
-        (body.account_id, body.source, body.file_name, now),
+        (body.account_id, body.source, file_name_payload, now),
     )
     batch_id = cur.lastrowid
     conn.commit()

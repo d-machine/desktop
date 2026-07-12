@@ -55,6 +55,7 @@ export function PinInput({ length = 6, onChange, onComplete, disabled, error }: 
           ref={(el) => { inputs.current[i] = el; }}
           type="password"
           inputMode="numeric"
+          autoComplete="off"
           maxLength={1}
           value={digit}
           onChange={(e) => handleChange(i, e.target.value)}
@@ -62,9 +63,9 @@ export function PinInput({ length = 6, onChange, onComplete, disabled, error }: 
           onPaste={handlePaste}
           disabled={disabled}
           className={cn(
-            "w-12 h-14 text-center text-xl font-semibold rounded-lg border-2 bg-background",
+            "w-12 h-14 text-center text-xl font-semibold rounded-lg border-2 bg-background [&::-ms-reveal]:hidden [&::-webkit-credentials-auto-fill-button]:hidden",
             "focus:outline-none focus:border-primary transition-colors",
-            error ? "border-destructive" : "border-border",
+            error ? "border-destructive" : "border-input",
             disabled && "opacity-50 cursor-not-allowed"
           )}
         />

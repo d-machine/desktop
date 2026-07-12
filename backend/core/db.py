@@ -32,7 +32,7 @@ def _decrypt_file(src: Path, dest: Path, master_key: bytes) -> None:
     dest.write_bytes(plaintext)
 
 
-def open_database(app_dir: Path, master_key: bytes) -> sqlite3.Connection:
+def open_database(app_dir: Path, master_key: bytes, default_server_url: str = "") -> sqlite3.Connection:
     plain = _plain_path(app_dir)
     enc = _enc_path(app_dir)
 
@@ -51,7 +51,7 @@ def open_database(app_dir: Path, master_key: bytes) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.commit()
 
-    run_migrations(conn)
+    run_migrations(conn, default_server_url=default_server_url)
     return conn
 
 

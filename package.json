@@ -5,7 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "tauri:dev": "tauri dev",
+    "tauri:dev:local": "cross-env ARTHDESK_SERVER_URL=http://localhost:8000 tauri dev",
+    "tauri:dev:remote": "cross-env ARTHDESK_SERVER_URL=https://arthdeskapi.ashokitservices.com tauri dev",
     "build": "tsc && vite build",
+    "tauri:build": "tauri build",
+    "tauri:build:local": "cross-env ARTHDESK_SERVER_URL=http://localhost:8000 tauri build",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -35,6 +40,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "cross-env": "^10.1.0",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

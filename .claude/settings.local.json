@@ -101,7 +101,42 @@
       "PowerShell(Get-Process python -ErrorAction SilentlyContinue)",
       "Bash(python -c \"import sqlite3; print\\(sqlite3.sqlite_version\\)\")",
       "Bash(python -m py_compile routers/transactions.py routers/import_.py services/holdings.py services/reports.py importers/bajaj_finance.py importers/invest_plus_opening_stock.py importers/angel_one.py)",
-      "Bash(.venv/Scripts/python -c ' *)"
+      "Bash(.venv/Scripts/python -c ' *)",
+      "Bash(ls \"C:\\\\Users\\\\SUMIT\\\\AppData\\\\Roaming\\\\com.dmachine.desktop\\\\\" 2>/dev/null || echo \"Directory not found\")",
+      "Read(//c/Users/SUMIT/AppData/Roaming/com.dmachine.desktop\" 2>/dev/**)",
+      "Bash(xargs grep -l -i \"tax\")",
+      "Bash(cd /c/Users/SUMIT/Workspace/AISPL/desktop/backend && find . -type f -name \"*.py\" | head -30)",
+      "Read(//c/c/Users/SUMIT/Workspace/AISPL/desktop/**)",
+      "PowerShell(python -m pytest --version)",
+      "PowerShell(pip install pandas lxml pytz APScheduler 2>&1)",
+      "PowerShell(python -c \"import pandas; print\\('pandas ok'\\)\")",
+      "PowerShell(pip install requests google-cloud-storage python-dotenv tzlocal 2>&1)",
+      "PowerShell(python -c \"import requests; import google.cloud.storage; print\\('ok'\\)\")",
+      "PowerShell(pip install google-cloud-storage 2>&1)",
+      "PowerShell(python -c \"from google.cloud import storage; print\\('gcs ok'\\)\")",
+      "PowerShell(python \"C:\\\\Users\\\\SUMIT\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-SUMIT-Workspace-AISPL-desktop\\\\895c78ae-9811-4438-b556-e8f344c24df2\\\\scratchpad\\\\debug_schema.py\")",
+      "PowerShell(python -c \"from jose import jwt; t = jwt.encode\\({'sub': 1, 'exp': 9999999999}, 'secret', 'HS256'\\); p = jwt.decode\\(t, 'secret', algorithms=['HS256']\\); print\\(type\\(p['sub']\\), p['sub']\\)\")",
+      "Read(//etc/nginx/**)",
+      "Bash(python -m pytest tests/test_persons.py tests/test_crypto.py tests/test_underpaid.py -x -q)",
+      "PowerShell(Start-Process \"C:\\\\Program Files\\\\Docker\\\\Docker\\\\Docker Desktop.exe\")",
+      "PowerShell(docker info 2>&1)",
+      "Bash(docker info *)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://localhost:8000/health\" -Method GET 2>&1)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://localhost:8000/health\" -Method GET)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://127.0.0.1:64530/api/auth/status\" -Method GET 2>&1)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(docker compose *)",
+      "PowerShell(Invoke-RestMethod http://localhost:8000/health)",
+      "PowerShell(Invoke-RestMethod -Method Post -Uri http://localhost:8000/auth/login -ContentType \"application/json\" -Body '{\"email\":\"test@test.com\",\"password\":\"wrongpass\"}' -ErrorAction SilentlyContinue; Write-Host \"Status: $\\([int]$_.Exception.Response.StatusCode\\)\")",
+      "Bash(docker system *)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s -o /dev/null -w \"admin:%{http_code}\" http://localhost:8081/)",
+      "Bash(curl -s http://localhost:8080/account.html)",
+      "Bash(rm -f \"c:/Users/SUMIT/Workspace/AISPL/server/data/auth.db\" \\\\ *)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\SUMIT\\Workspace\\AISPL\\server\\data\\screenshots"
     ]
   }
 }
