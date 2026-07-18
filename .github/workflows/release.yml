@@ -8,8 +8,6 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    outputs:
-      exe_name: ${{ steps.find_exe.outputs.exe_name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -53,19 +51,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Find installer exe
-        id: find_exe
+      - name: Rename installer to versioned name
         shell: pwsh
         run: |
+          $tag = "${{ github.ref_name }}"
           $exe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
-          echo "exe_name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+          $dest = "src-tauri/target/release/bundle/nsis/ArthaDesk-Setup-$tag.exe"
+          Rename-Item $exe.FullName $dest
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: src-tauri/target/release/bundle/nsis/*.exe
-          retention-days: 1
+          path: src-tauri/target/release/bundle/nsis/ArthaDesk-Setup-*.exe
+          retention-days: 7
 
   deploy:
     runs-on: ubuntu-latest
@@ -78,7 +77,7 @@ jobs:
           name: windows-installer
           path: ./installer
 
-      - name: Deploy to VPS
+      - name: Deploy versioned exe to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -88,7 +87,7 @@ jobs:
           target: "/home/dmachine/workspace/data/executables/"
           strip_components: 1
 
-      - name: Rename to ArthaDesk-Setup.exe
+      - name: Update latest symlink on VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -96,4 +95,6 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /home/dmachine/workspace/data/executables
-            mv *.exe ArthaDesk-Setup.exe 2>/dev/null || true
+            latest=$(ls -t ArthaDesk-Setup-v*.exe | head -1)
+            ln -sf "$latest" ArthaDesk-Setup.exe
+            echo "Latest: $latest"
