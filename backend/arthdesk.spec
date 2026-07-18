@@ -62,6 +62,7 @@ a = Analysis(
         "services.prices",
         "importers.common",
         "importers.pdf_utils",
+        "pydantic_core._pydantic_core",
         "importers.angel_one",
         "importers.cams_cas",
         "importers.choice_mf",
