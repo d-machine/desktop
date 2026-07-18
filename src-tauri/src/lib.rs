@@ -11,8 +11,7 @@ use tauri_plugin_opener::OpenerExt;
 // ─── State ───────────────────────────────────────────────────────────────────
 
 struct BackendProcess {
-    child:  Child,
-    port:   u16,
+    child: Child,
 }
 
 // Holds the port once the backend is confirmed healthy — readable by React via command.
@@ -189,7 +188,7 @@ pub fn run() {
                         }
                     };
                     let mut guard = state_for_thread.lock().unwrap();
-                    *guard = Some(BackendProcess { child, port });
+                    *guard = Some(BackendProcess { child });
                 } else {
                     eprintln!("[backend] using manually started backend on port {port}");
                 }
