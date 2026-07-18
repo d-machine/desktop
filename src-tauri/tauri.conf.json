@@ -35,10 +35,11 @@
       "binaries/pdftotext"
     ],
     "resources": {
-      "binaries/libgcc_s_seh-1.dll":   "libgcc_s_seh-1.dll",
-      "binaries/libstdc++-6.dll":      "libstdc++-6.dll",
-      "binaries/libwinpthread-1.dll":  "libwinpthread-1.dll",
-      "backend/**/*":                  "backend/"
+      "binaries/libgcc_s_seh-1.dll":      "libgcc_s_seh-1.dll",
+      "binaries/libstdc++-6.dll":         "libstdc++-6.dll",
+      "binaries/libwinpthread-1.dll":     "libwinpthread-1.dll",
+      "backend/backend.exe":              "backend/backend.exe",
+      "backend/_internal/**/*":           "backend/_internal/"
     }
   }
 }
