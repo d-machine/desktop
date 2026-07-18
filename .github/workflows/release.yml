@@ -41,8 +41,9 @@ jobs:
         working-directory: backend
         run: pyinstaller arthdesk.spec --distpath dist --workpath build
 
-      - name: Copy backend binary to Tauri binaries
-        run: copy backend\dist\backend\backend.exe src-tauri\binaries\backend-x86_64-pc-windows-msvc.exe
+      - name: Copy backend to Tauri resources
+        run: |
+          xcopy /E /I /Y backend\dist\backend src-tauri\backend
 
       - name: Install frontend dependencies
         run: npm ci
