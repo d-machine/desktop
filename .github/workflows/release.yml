@@ -42,11 +42,14 @@ jobs:
       - name: Copy backend to Tauri resources
         shell: pwsh
         run: |
-          Write-Host "PyInstaller output structure:"
-          Get-ChildItem backend/dist/backend -Recurse | Select-Object FullName | Select-Object -First 20
+          Write-Host "PyInstaller output:"
+          Get-ChildItem backend/dist/backend -Recurse | Select-Object FullName | Select-Object -First 30
           if (Test-Path src-tauri/backend) { Remove-Item src-tauri/backend -Recurse -Force }
           New-Item -ItemType Directory -Path src-tauri/backend | Out-Null
-          Copy-Item backend/dist/backend/* src-tauri/backend/ -Recurse
+          Copy-Item backend/dist/backend/backend.exe src-tauri/backend/backend.exe
+          Copy-Item backend/dist/backend/_internal src-tauri/backend/_internal -Recurse
+          Write-Host "Copied to src-tauri/backend:"
+          Get-ChildItem src-tauri/backend -Recurse | Select-Object FullName | Select-Object -First 10
 
       - name: Install frontend dependencies
         run: npm ci

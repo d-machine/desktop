@@ -39,7 +39,7 @@
       "binaries/libstdc++-6.dll",
       "binaries/libwinpthread-1.dll",
       "backend/backend.exe",
-      "backend/_internal/**"
+      "backend/_internal/**/*"
     ]
   }
 }
