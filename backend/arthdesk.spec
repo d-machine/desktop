@@ -8,12 +8,13 @@ from PyInstaller.utils.hooks import collect_all
 block_cipher = None
 
 pydantic_datas, pydantic_binaries, pydantic_hiddenimports = collect_all("pydantic_core")
+email_datas, email_binaries, email_hiddenimports = collect_all("email_validator")
 
 a = Analysis(
     ["main.py"],
     pathex=["."],
-    binaries=pydantic_binaries,
-    datas=pydantic_datas,
+    binaries=pydantic_binaries + email_binaries,
+    datas=pydantic_datas + email_datas,
     hiddenimports=[
         # FastAPI / uvicorn internals
         "uvicorn.logging",
@@ -68,6 +69,8 @@ a = Analysis(
         "importers.pdf_utils",
         "pydantic_core._pydantic_core",
         *pydantic_hiddenimports,
+        "email_validator",
+        *email_hiddenimports,
         "importers.angel_one",
         "importers.cams_cas",
         "importers.choice_mf",

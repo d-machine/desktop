@@ -7,4 +7,5 @@ openpyxl
 xlrd
 xlsxwriter
 httpx
-pydantic>=2.0
+pydantic[email]>=2.0
+email-validator
