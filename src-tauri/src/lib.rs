@@ -88,20 +88,24 @@ fn backend_exe_path(app: &tauri::App) -> PathBuf {
     // Production: backend/ is bundled as a Tauri resource next to the executable.
     if let Ok(res_dir) = app.path().resource_dir() {
         let candidate = res_dir.join("backend").join("backend.exe");
+        eprintln!("[backend] checking resource path: {:?} exists={}", candidate, candidate.exists());
         if candidate.exists() {
             return candidate;
         }
     }
     // Also check next to the executable (some Tauri installer layouts)
     if let Ok(exe) = std::env::current_exe() {
+        eprintln!("[backend] exe path: {:?}", exe);
         if let Some(exe_dir) = exe.parent() {
             let candidate = exe_dir.join("backend").join("backend.exe");
+            eprintln!("[backend] checking exe-dir path: {:?} exists={}", candidate, candidate.exists());
             if candidate.exists() {
                 return candidate;
             }
         }
     }
     // Dev mode: use venv Python if it exists, else system Python
+    eprintln!("[backend] falling back to dev mode path");
     PathBuf::from("../backend/main.py")
 }
 
