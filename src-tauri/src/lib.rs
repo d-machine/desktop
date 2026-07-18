@@ -76,6 +76,14 @@ async fn open_path(app: AppHandle, path: String) -> Result<(), String> {
 
 // ─── Sidecar lifecycle ────────────────────────────────────────────────────────
 
+fn kill_orphaned_backends() {
+    // On Windows, kill any leftover backend.exe from a previous crash
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "backend.exe"])
+        .output();
+}
+
 fn find_free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .expect("could not find a free port")
@@ -160,6 +168,8 @@ pub fn run() {
 
             // If ARTHDESK_BACKEND_PORT is set, skip spawning and use that port directly.
             // Useful for development: run Python manually in one terminal, Tauri in another.
+            kill_orphaned_backends();
+
             let manual_port = std::env::var("ARTHDESK_BACKEND_PORT")
                 .ok()
                 .and_then(|v| v.parse::<u16>().ok());
