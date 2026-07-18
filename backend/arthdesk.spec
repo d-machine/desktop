@@ -3,13 +3,17 @@
 # Output: dist/backend/backend.exe  (--onedir, fastest startup)
 # Then copy to: src-tauri/binaries/backend-x86_64-pc-windows-msvc.exe
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
+
+pydantic_datas, pydantic_binaries, pydantic_hiddenimports = collect_all("pydantic_core")
 
 a = Analysis(
     ["main.py"],
     pathex=["."],
-    binaries=[],
-    datas=[],
+    binaries=pydantic_binaries,
+    datas=pydantic_datas,
     hiddenimports=[
         # FastAPI / uvicorn internals
         "uvicorn.logging",
@@ -63,6 +67,7 @@ a = Analysis(
         "importers.common",
         "importers.pdf_utils",
         "pydantic_core._pydantic_core",
+        *pydantic_hiddenimports,
         "importers.angel_one",
         "importers.cams_cas",
         "importers.choice_mf",
