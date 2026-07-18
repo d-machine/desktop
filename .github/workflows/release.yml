@@ -8,6 +8,8 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      exe_name: ${{ steps.find_exe.outputs.exe_name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +42,7 @@ jobs:
         run: pyinstaller arthdesk.spec --distpath dist --workpath build
 
       - name: Copy backend binary to Tauri binaries
-        run: |
-          copy backend\dist\backend\backend.exe src-tauri\binaries\backend-x86_64-pc-windows-msvc.exe
+        run: copy backend\dist\backend\backend.exe src-tauri\binaries\backend-x86_64-pc-windows-msvc.exe
 
       - name: Install frontend dependencies
         run: npm ci
@@ -51,12 +52,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Find installer exe
+        id: find_exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+          echo "exe_name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 1
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-windows
+
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: ./installer
+
       - name: Deploy to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "src-tauri/target/release/bundle/nsis/ArthaDesk_*_x64-setup.exe"
+          source: "installer/*.exe"
           target: "/home/dmachine/workspace/data/executables/"
-          strip_components: 6
+          strip_components: 1
+
+      - name: Rename to ArthaDesk-Setup.exe
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /home/dmachine/workspace/data/executables
+            mv *.exe ArthaDesk-Setup.exe 2>/dev/null || true
