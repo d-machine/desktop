@@ -108,9 +108,9 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
         {step === "server-login" && (
           <>
             <CardHeader className="text-center">
-              <CardTitle className="text-2xl">Sign in to your account</CardTitle>
+              <CardTitle className="text-2xl">Welcome back</CardTitle>
               <CardDescription>
-                Sign in to the portfolio server to get started.
+                Sign in to continue to ArthaDesk.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
