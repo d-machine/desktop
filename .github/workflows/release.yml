@@ -33,7 +33,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install "pyinstaller<6.0"
+          pip install setuptools "pyinstaller<6.0"
 
       - name: Build Python backend with PyInstaller
         working-directory: backend
