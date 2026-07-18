@@ -2,6 +2,13 @@ import argparse
 import os
 import sqlite3
 import sys
+
+# When bundled as a windowless PyInstaller exe, sys.stdout/stderr are None.
+# Redirect to devnull so uvicorn's logging formatters don't crash on isatty().
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 from contextlib import asynccontextmanager
 from pathlib import Path
 
