@@ -1,8 +1,8 @@
 [package]
-name = "desktop"
+name = "ArthaDesk"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Indian Portfolio Tracker"
+authors = ["dmachine"]
 edition = "2021"
 
 [lib]
