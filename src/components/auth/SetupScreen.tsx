@@ -110,7 +110,15 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
             <CardHeader className="text-center">
               <CardTitle className="text-2xl">Welcome back</CardTitle>
               <CardDescription>
-                Sign in to continue to ArthaDesk.
+                Sign in to continue to ArthaDesk.{" "}
+                <a
+                  href="https://arthdesk.ashokitservices.com/auth#register"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  Don't have an account?
+                </a>
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
