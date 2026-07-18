@@ -117,7 +117,7 @@ export function TaxPage({ activePerson, personAccountIds: personAccountIdsProp }
     setPortfolios([]);
     setAllAccounts([]);
     setSelectedAccountIds([]);
-    if (personAccountIdsProp[0] === -1) return; // person has no accounts
+    if (personAccountIdsProp![0] === -1) return; // person has no accounts
     Promise.all([
       apiGet<Portfolio[]>("/portfolios"),
       apiGet<Account[]>("/accounts"),

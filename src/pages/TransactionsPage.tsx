@@ -91,7 +91,7 @@ export function TransactionsPage({ activePerson, personPortfolioIds, personAccou
   const [batchDetail, setBatchDetail]   = useState<ImportBatch | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
 
-  const [accountsReady, setAccountsReady] = useState(false);
+  const [, setAccountsReady] = useState(false);
 
   const [showAdd, setShowAdd]       = useState(false);
   const [showImport, setShowImport] = useState(false);
